@@ -10,7 +10,14 @@ permission prompt, asks a question, or the model server degrades. Hawk watches
 the session and nudges it along. It also pings your phone when a human is
 actually needed.
 
-<!-- TODO: screenshot of the dashboard -->
+![Hawk dashboard, Modern skin](docs/screenshots/dashboard-modern.png)
+
+<details>
+<summary>Classic skin</summary>
+
+![Hawk dashboard, Classic skin](docs/screenshots/dashboard-classic.png)
+
+</details>
 
 ## What it does
 
