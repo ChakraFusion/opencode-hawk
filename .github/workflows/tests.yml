@@ -6,10 +6,11 @@ on:
 
 jobs:
   self-test:
-    runs-on: windows-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [windows-latest, ubuntu-latest]
         python: ["3.10", "3.12"]
     env:
       PYTHONIOENCODING: utf-8
@@ -21,8 +22,11 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: pip install -r requirements.txt
       - name: coordinator self-test
+        if: always()
         run: python tests/selftest_coordinator.py
       - name: dashboard self-test
+        if: always()
         run: python tests/selftest_dashboard.py
       - name: notify self-test
+        if: always()
         run: python tests/selftest_notify.py
