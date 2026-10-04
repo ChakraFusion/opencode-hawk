@@ -36,7 +36,7 @@ jobs:
       - name: install the package (pip install .)
         if: always()
         run: pip install .
-      - name: smoke (installed `hawk`: init, dry-run poll, dashboard endpoints)
+      - name: "smoke (installed hawk: init, dry-run poll, dashboard endpoints)"
         if: always()
         shell: bash
         run: |
