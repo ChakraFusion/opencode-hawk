@@ -20,6 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import coordinator  # same dir; load_state/load_config/connect_db/db_path/git_head/...
+import hawk_linux
 
 DEFAULT_PORT = 8765
 WEB_DIR = Path(__file__).resolve().parent / "web"
@@ -1978,13 +1979,16 @@ def _compaction_detected(prev, cur) -> bool:
 def llama_vram_mb(pid) -> float | None:
     """VRAM used by the llama process, from the Windows GPU process-memory
     perf counter (instance `pid_<pid>_*`). ~1 s query via powershell; the result
-    is cached for 30 s. Returns None if unavailable."""
+    is cached for 30 s. Returns None if unavailable. On Linux: the process's
+    DRM fdinfo (amdgpu) or nvidia-smi."""
     global _VRAM_CACHE
     now = time.time()
     if _VRAM_CACHE and now - _VRAM_CACHE[0] < 30 and _VRAM_CACHE[1] == pid:
         return _VRAM_CACHE[2]
     mb = None
-    if pid:
+    if pid and os.name != "nt":
+        mb = hawk_linux.process_vram_mb(pid)
+    elif pid:
         try:
             # -EncodedCommand avoids powershell re-parsing the counter path
             # (the `(*)` wildcard breaks -Command string parsing).
@@ -2427,40 +2431,9 @@ def hw_ram_sticks_info() -> list[dict]:
 
 
 def _hw_gpu_totals_sync() -> list[dict]:
-    """[{name, total_mb}] — one entry per adapter in the video-class registry
-    (WDDM enumeration order): DriverDesc from each subkey, total_mb from the
-    QWORD 'HardwareInformation.qwMemorySize' (the real dedicated VRAM; WMI
-    AdapterRAM is 32-bit capped), 0 for UMA/virtual adapters without one. This
-    mirrors the per-adapter PDH engine rows one-for-one, so the dashboard can
-    pair names/totals positionally. Empty on failure."""
-    out: list[dict] = []
-    if os.name != "nt":
-        return out
-    try:
-        cmd = ('powershell.exe -NoProfile -NonInteractive -Command '
-               '"Get-ChildItem \'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\'
-               'Class\\{4d36e968-e325-11ce-bfc1-08002be10318}\' | '
-               'Where-Object { $_.PSChildName -match \'^\\d{4}$\' } | '
-               'ForEach-Object { $p = Get-ItemProperty $_.PSPath; '
-               '$v = $p.\'HardwareInformation.qwMemorySize\'; '
-               '$s = 0; if ($null -ne $v) { $s = $v }; '
-               '\'{0}|{1}\' -f $p.DriverDesc, $s }"')
-        res = subprocess.run(cmd, shell=True, capture_output=True, text=True,
-                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                             timeout=10).stdout
-        for ln in res.splitlines():
-            ln = ln.strip()
-            if "|" not in ln:
-                continue
-            name, _, size = ln.rpartition("|")
-            try:
-                mb = int(size) / (1024.0 * 1024.0)
-            except ValueError:
-                continue
-            out.append({"name": name.strip(), "total_mb": mb})
-    except Exception:
-        return []
-    return out
+    """[{name, total_mb}] per adapter, in the same order as the per-adapter
+    usage rows (see coordinator.gpu_adapter_totals)."""
+    return coordinator.gpu_adapter_totals()
 
 
 def _hw_disk_inventory_sync() -> dict:
@@ -2468,6 +2441,8 @@ def _hw_disk_inventory_sync() -> dict:
     (Size = total bytes) and its partitions' drive letters. Empty on failure;
     the letters fallback keeps the glyphs labelable ('Disk n') when the
     mapping is unavailable."""
+    if os.name != "nt":
+        return hawk_linux.disk_inventory()
     inv: dict = {}
     if os.name != "nt":
         return inv

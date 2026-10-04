@@ -12,11 +12,10 @@
   "record_escalations_to_session": true,
 
   "continue_via_attach": true,
-  "restart_desktop_before_continue": false,
-  "desktop_exe": "",
 
   "llama_pid": 0,
   "llama_api_port": 1234,
+  "llama_bat_path": "",
   "llama_task_tracking": true,
   "gpu_vram_total_mb": 0,
 

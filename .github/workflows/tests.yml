@@ -6,10 +6,11 @@ on:
 
 jobs:
   self-test:
-    runs-on: windows-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [windows-latest, ubuntu-latest]
         python: ["3.10", "3.12"]
     env:
       PYTHONIOENCODING: utf-8
@@ -21,8 +22,29 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: pip install -r requirements.txt
       - name: coordinator self-test
+        if: always()
         run: python tests/selftest_coordinator.py
       - name: dashboard self-test
+        if: always()
         run: python tests/selftest_dashboard.py
       - name: notify self-test
+        if: always()
         run: python tests/selftest_notify.py
+      - name: linux probes self-test
+        if: always()
+        run: python tests/selftest_linux.py
+      - name: smoke (dry-run poll + dashboard endpoints)
+        if: always()
+        shell: bash
+        run: |
+          export COORD_HOME="$RUNNER_TEMP/hawk-home"
+          mkdir -p "$COORD_HOME"
+          cp config.example.json "$COORD_HOME/config.json"
+          python coordinator.py --once --dry-run
+          python dashboard.py --port 8799 > "$RUNNER_TEMP/dash.log" 2>&1 &
+          for i in $(seq 1 30); do curl -sf -o /dev/null http://127.0.0.1:8799/ && break; sleep 1; done
+          for path in / /api/state /api/timeline; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "http://127.0.0.1:8799$path")
+            echo "$path -> $code"
+            [ "$code" = "200" ] || { cat "$RUNNER_TEMP/dash.log"; exit 1; }
+          done
