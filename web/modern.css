@@ -1,0 +1,156 @@
+/* Modern theme: a skin over the shared Classic page (same markup, same
+   app.js), so every feature and setting exists in both themes. Every rule
+   is scoped to html[data-theme="modern"]; Classic is untouched.
+   Palette and type from the original Modern design: IBM Plex Mono +
+   Space Grotesk, near-black canvas, mint accent, frosted gradient cards. */
+
+html[data-theme="modern"] {
+  --bg: #0b0c10; --panel: rgba(18, 21, 27, .8); --line: rgba(232, 236, 242, .08);
+  --fg: #e8ecf2; --dim: #7c8798; --accent: #33f5a0;
+  --ok: #33f5a0; --warn: #f0bb3b; --bad: #ff8179;
+  --mono: "IBM Plex Mono", ui-monospace, monospace;
+  --sans: "Space Grotesk", -apple-system, "Segoe UI", sans-serif;
+  --card-bg: linear-gradient(165deg, rgba(22, 25, 32, .72), rgba(12, 14, 18, .88));
+  --inset: rgba(5, 6, 9, .55);
+  --glow: rgba(51, 245, 160, .12);
+}
+html[data-theme="modern"] body {
+  font: 13.5px/1.5 var(--sans);
+  background:
+    radial-gradient(900px 520px at 12% -8%, rgba(28, 84, 66, .38), transparent 60%),
+    radial-gradient(800px 500px at 100% 0%, rgba(38, 44, 90, .32), transparent 60%),
+    var(--bg) fixed;
+  min-height: 100vh;
+}
+
+/* ---- header: frosted bar ---- */
+html[data-theme="modern"] header {
+  max-width: 1320px; margin: 14px auto 0; padding: 12px 18px;
+  background: rgba(12, 14, 18, .72); border: 1px solid var(--line);
+  border-radius: 18px; backdrop-filter: blur(18px); top: 10px; z-index: 50;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .35);
+}
+html[data-theme="modern"] .brand {
+  font: 600 15px var(--sans); letter-spacing: .14em; text-transform: uppercase;
+}
+html[data-theme="modern"] .dot { box-shadow: 0 0 0 4px var(--glow), 0 0 12px var(--accent); }
+html[data-theme="modern"] .badge {
+  font: 500 11px var(--mono); letter-spacing: .08em; padding: 4px 11px;
+  background: rgba(232, 236, 242, .06); border: 1px solid var(--line); color: var(--fg);
+}
+html[data-theme="modern"] .badge.watch { background: rgba(51, 245, 160, .12); border-color: rgba(51, 245, 160, .35); color: var(--ok); }
+html[data-theme="modern"] .badge.busy { background: rgba(88, 166, 255, .12); border-color: rgba(88, 166, 255, .35); color: #7cb8ff; }
+html[data-theme="modern"] .badge.paused { background: rgba(240, 187, 59, .1); border-color: rgba(240, 187, 59, .3); color: var(--warn); }
+html[data-theme="modern"] .badge.offline { color: var(--dim); }
+
+/* ---- buttons / inputs ---- */
+html[data-theme="modern"] .btn {
+  background: rgba(232, 236, 242, .04); border: 1px solid rgba(232, 236, 242, .12);
+  color: var(--fg); border-radius: 10px; font: 500 11.5px var(--mono);
+  letter-spacing: .06em; text-transform: uppercase; padding: 7px 14px;
+  transition: border-color .15s, background .15s, color .15s;
+}
+html[data-theme="modern"] .btn:hover { border-color: rgba(51, 245, 160, .5); color: var(--accent); background: rgba(51, 245, 160, .06); }
+html[data-theme="modern"] #btn-pause { border-color: rgba(51, 245, 160, .35); color: var(--accent); background: rgba(51, 245, 160, .08); }
+html[data-theme="modern"] .dev-add input,
+html[data-theme="modern"] .sess-pick,
+html[data-theme="modern"] .settings-row input {
+  background: var(--inset); border: 1px solid rgba(232, 236, 242, .1); border-radius: 10px;
+  color: var(--fg); font-family: var(--mono); padding: 6px 10px;
+}
+html[data-theme="modern"] .dev-add input:focus,
+html[data-theme="modern"] .sess-pick:focus,
+html[data-theme="modern"] .settings-row input:focus { outline: none; border-color: rgba(51, 245, 160, .5); box-shadow: 0 0 0 3px var(--glow); }
+html[data-theme="modern"] input[type="checkbox"] { accent-color: var(--accent); }
+
+/* ---- layout: wider canvas, sessions + filter side by side ---- */
+html[data-theme="modern"] main {
+  max-width: 1320px; gap: 18px; padding: 18px 0 90px;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  grid-template-areas: "sessions window" "telemetry telemetry" "events events" "devices devices";
+}
+html[data-theme="modern"] #sessions { grid-area: sessions; }
+html[data-theme="modern"] #window { grid-area: window; }
+html[data-theme="modern"] #telemetry { grid-area: telemetry; }
+html[data-theme="modern"] #events { grid-area: events; }
+html[data-theme="modern"] #devices { grid-area: devices; }
+@media (max-width: 1000px) {
+  html[data-theme="modern"] main { grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "window" "sessions" "telemetry" "events" "devices"; padding: 14px 12px 90px; }
+  html[data-theme="modern"] header { margin: 10px 12px 0; }
+}
+
+/* ---- cards ---- */
+html[data-theme="modern"] .card {
+  background: var(--card-bg); border: 1px solid var(--line); border-radius: 18px;
+  padding: 18px 20px; box-shadow: 0 18px 40px rgba(0, 0, 0, .3);
+  backdrop-filter: blur(18px);
+}
+html[data-theme="modern"] .card h2 {
+  font: 500 11px var(--mono); letter-spacing: .16em; color: var(--dim); margin-bottom: 14px;
+}
+html[data-theme="modern"] .card h2 .dim { letter-spacing: .04em; text-transform: none; }
+html[data-theme="modern"] #window { padding: 18px 20px; }
+html[data-theme="modern"] #window .range-row { gap: 12px; }
+html[data-theme="modern"] #window .sess-pick { width: 100%; padding: 8px 10px; }
+html[data-theme="modern"] .range-btns { background: var(--inset); border-color: var(--line); border-radius: 12px; padding: 4px; }
+html[data-theme="modern"] .range-btn { font-family: var(--mono); border-radius: 8px; padding: 5px 12px; }
+html[data-theme="modern"] .range-btn.active { background: var(--accent); color: #062014; font-weight: 600; box-shadow: 0 0 14px rgba(51, 245, 160, .35); }
+
+/* ---- sessions ---- */
+html[data-theme="modern"] .sess-list li {
+  border: 1px solid var(--line); border-radius: 12px; padding: 9px 12px; margin-bottom: 8px;
+  background: rgba(232, 236, 242, .02);
+}
+html[data-theme="modern"] .sess-list li:last-child { margin-bottom: 0; border-bottom: 1px solid var(--line); }
+html[data-theme="modern"] .sess-list li .dim.mono { font-size: 11px; }
+html[data-theme="modern"] .sess-row.live { border-color: rgba(51, 245, 160, .22); }
+html[data-theme="modern"] .sess-row.live .live-dot { box-shadow: 0 0 8px var(--accent); }
+html[data-theme="modern"] .sess-showall { font-family: var(--mono); letter-spacing: .02em; }
+
+/* ---- telemetry: tiles as KPI cards, charts as inset panels ---- */
+html[data-theme="modern"] .hw-row { gap: 28px; margin-bottom: 18px; }
+html[data-theme="modern"] .grid.tiles { gap: 12px; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+html[data-theme="modern"] .grid.tiles > div {
+  border: 1px solid var(--line); border-left: 1px solid var(--line); border-radius: 14px;
+  padding: 12px 14px; background: rgba(232, 236, 242, .03);
+}
+html[data-theme="modern"] .grid dt { font: 500 10px var(--mono); letter-spacing: .14em; color: var(--dim); }
+html[data-theme="modern"] .grid.tiles dd { font: 600 15px var(--mono); color: #f2f5f9; margin-top: 6px;
+  overflow: hidden; text-overflow: ellipsis; }
+html[data-theme="modern"] .charts { gap: 18px; margin-top: 18px; }
+html[data-theme="modern"] .chart-title { font: 500 10px var(--mono); letter-spacing: .14em; }
+html[data-theme="modern"] canvas {
+  height: 130px; background: var(--inset); border: 1px solid var(--line); border-radius: 12px;
+}
+html[data-theme="modern"] #chart-tt {
+  background: rgba(12, 14, 18, .92); border-color: rgba(232, 236, 242, .14);
+  border-radius: 10px; backdrop-filter: blur(12px); font-family: var(--mono);
+}
+
+/* ---- events + notifications lists ---- */
+html[data-theme="modern"] .tl-head { font: 500 10px var(--mono); letter-spacing: .14em; border-bottom-color: var(--line); }
+html[data-theme="modern"] .tl li { border-bottom-color: rgba(232, 236, 242, .05); padding: 8px 4px; border-radius: 8px; }
+html[data-theme="modern"] .tl li:hover { background: rgba(232, 236, 242, .03); }
+html[data-theme="modern"] .tl .time, html[data-theme="modern"] .tl .session { font-family: var(--mono); }
+html[data-theme="modern"] .tag { font: 600 10px var(--mono); letter-spacing: .08em; border-radius: 999px; padding: 2px 8px; }
+html[data-theme="modern"] .achip { font-family: var(--mono); border-radius: 999px; }
+html[data-theme="modern"] .notify-kinds { border-color: var(--line); border-radius: 12px; background: rgba(232, 236, 242, .02); }
+html[data-theme="modern"] #notify-log .notif-body { background: var(--inset); border-color: var(--line); border-left-color: var(--accent); border-radius: 10px; }
+html[data-theme="modern"] .pending-route { border-radius: 12px; }
+
+/* ---- floating controls + settings ---- */
+html[data-theme="modern"] footer { max-width: 1320px; margin: 0 auto; border-top: none; text-align: center; }
+html[data-theme="modern"] .theme-toggle,
+html[data-theme="modern"] .gear-btn {
+  background: rgba(12, 14, 18, .82); border-color: rgba(232, 236, 242, .12); backdrop-filter: blur(18px);
+}
+html[data-theme="modern"] .theme-toggle { border-radius: 12px; }
+html[data-theme="modern"] .tt-btn { font-family: var(--mono); border-radius: 8px; }
+html[data-theme="modern"] .tt-btn.active { background: rgba(51, 245, 160, .14); color: var(--accent); }
+html[data-theme="modern"] .gear-btn:hover, html[data-theme="modern"] .gear-btn.active { border-color: rgba(51, 245, 160, .5); color: var(--accent); }
+html[data-theme="modern"] .settings-panel {
+  background: rgba(12, 14, 18, .94); border-color: rgba(232, 236, 242, .12);
+  border-radius: 18px; backdrop-filter: blur(18px);
+}
+html[data-theme="modern"] .settings-panel .card { box-shadow: none; }

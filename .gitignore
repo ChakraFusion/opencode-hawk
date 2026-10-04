@@ -1,0 +1,36 @@
+# Your local configuration (copy config.example.json to config.json)
+config.json
+
+# Runtime state written by Hawk
+state.json
+state.backup_*.json
+control.json
+pending_replies.json
+pending_ntfy_routes.json
+event_push_state.json
+permission_events.jsonl
+llama_restart.json
+notify_log.json
+notify_log.json.*.tmp
+monitor.pid
+escalations/
+*.db
+*.db-shm
+*.db-wal
+
+# Logs
+*.log
+*.log.bak
+*.err
+*.out
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Tool / editor scratch
+.opencode/
+.playwright-mcp/
+.vscode/
+.idea/

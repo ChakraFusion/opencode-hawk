@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hawk</title>
+<link rel="stylesheet" href="style.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="modern.css">
+<script>
+// Theme is a skin over this one page (modern.css scopes every rule to
+// html[data-theme="modern"]); set it before first paint to avoid a flash.
+(function () {
+  var t = null;
+  try { t = localStorage.getItem("hawk_theme"); } catch (e) {}
+  document.documentElement.dataset.theme = t === "modern" ? "modern" : "classic";
+})();
+</script>
+</head>
+<body>
+<header>
+  <div class="brand"><span class="dot"></span> Hawk</div>
+  <div class="badge-row">
+    <span id="badge" class="badge">…</span>
+    <span id="badge-worker" class="badge dim" title="Worker idle time">W: —</span>
+    <span id="badge-llama" class="badge dim" title="Llama idle time">L: —</span>
+  </div>
+  <nav class="controls">
+    <button id="btn-pause" class="btn" type="button">Pause</button>
+    <button id="btn-poll" class="btn" type="button">Poll now</button>
+  </nav>
+</header>
+
+<main>
+  <section class="card" id="sessions">
+    <h2>Sessions <span id="session-cap" class="dim"></span>
+      <label class="sess-showall"><input type="checkbox" id="session-showall"> show all</label>
+      <label class="sess-showall"><input type="checkbox" id="session-hidesub"> hide subsessions</label></h2>
+    <ul id="session-list" class="sess-list"></ul>
+  </section>
+
+<section class="card" id="window">
+    <h2>Session filter</h2>
+    <div class="range-row">
+      <div class="range-btns" id="range-btns">
+        <button class="range-btn" data-win="1h" type="button">1h</button>
+        <button class="range-btn" data-win="6h" type="button">6h</button>
+        <button class="range-btn active" data-win="24h" type="button">24h</button>
+        <button class="range-btn" data-win="7d" type="button">7d</button>
+        <button class="range-btn" data-win="30d" type="button">30d</button>
+      </div>
+      <select id="session-picker" class="sess-pick" title="Focus session for the board">
+      </select>
+    </div>
+  </section>
+
+  <section class="card" id="telemetry">
+    <h2>Llama telemetry</h2>
+    <div class="hw-row">
+      <div class="hw" id="hw-cpu-w" title="CPU usage">
+        <svg viewBox="0 0 48 48" aria-hidden="true">
+          <defs>
+            <clipPath id="hw-cpu-sil"><rect x="10" y="10" width="28" height="28" rx="4"/></clipPath>
+            <clipPath id="hw-cpu-use"><rect id="hw-cpu-use-r" x="0" y="48" width="48" height="0"/></clipPath>
+          </defs>
+          <g clip-path="url(#hw-cpu-sil)"><g clip-path="url(#hw-cpu-use)">
+            <rect id="hw-cpu-fill" x="0" y="0" width="48" height="48" class="fill"/>
+          </g></g>
+          <rect x="10" y="10" width="28" height="28" rx="4" class="sil"/>
+          <rect x="18" y="18" width="12" height="12" class="det"/>
+          <g class="dot">
+            <rect x="6" y="14" width="4" height="3"/><rect x="6" y="22" width="4" height="3"/><rect x="6" y="30" width="4" height="3"/>
+            <rect x="38" y="14" width="4" height="3"/><rect x="38" y="22" width="4" height="3"/><rect x="38" y="30" width="4" height="3"/>
+            <rect x="14" y="6" width="3" height="4"/><rect x="22" y="6" width="3" height="4"/><rect x="30" y="6" width="3" height="4"/>
+            <rect x="14" y="38" width="3" height="4"/><rect x="22" y="38" width="3" height="4"/><rect x="30" y="38" width="3" height="4"/>
+          </g>
+        </svg>
+        <span class="hw-label">CPU</span>
+      </div>
+      <div class="hw" id="hw-disk-w" title="Disk usage">
+        <div class="hw-svg" id="hw-disk-svg"></div>
+        <span class="hw-label">Disk</span>
+      </div>
+      <div class="hw" id="hw-ram-w" title="RAM usage">
+        <div class="hw-svg" id="hw-ram-svg"></div>
+        <span class="hw-label">RAM</span>
+      </div>
+      <div class="hw" id="hw-gpu-w" title="VRAM usage">
+        <div class="hw-svg" id="hw-gpu-svg"></div>
+        <span class="hw-label">GPU</span>
+      </div>
+    </div>
+    <dl class="grid tiles">
+      <div><dt title="Input tokens (context growth) in the selected window">Input tokens</dt><dd id="t-input">—</dd></div>
+      <div><dt title="Output tokens (decoded/generation) in the selected window">Output tokens</dt><dd id="t-output">—</dd></div>
+      <div><dt title="Current context size (llama /slots prompt_tokens)">Current context</dt><dd id="t-ctx">—</dd></div>
+      <div><dt>RAM</dt><dd id="t-ram">—</dd></div>
+      <div><dt>VRAM</dt><dd id="t-vram">—</dd></div>
+      <div><dt id="t-speed-label">Speed</dt><dd id="t-tps">—</dd></div>
+    </dl>
+    <div class="charts">
+      <div class="chart-box">
+        <div class="chart-title">CPU &amp; GPU usage <span class="dim">(<b style="color:#f0883e">■</b> CPU process · <b style="color:#bc8cff">■</b> GPU all engines)</span></div>
+        <canvas id="cpu-gpu-chart"></canvas>
+      </div>
+      <div class="chart-box">
+        <div class="chart-title">Context tokens</div>
+        <canvas id="ctx-chart"></canvas>
+      </div>
+      <div class="chart-box">
+        <div class="chart-title">Input tokens</div>
+        <canvas id="input-chart"></canvas>
+      </div>
+      <div class="chart-box">
+        <div class="chart-title">Output tokens</div>
+        <canvas id="output-chart"></canvas>
+      </div>
+      <div class="chart-box">
+        <div class="chart-title">RAM usage <span class="dim">(system)</span></div>
+        <canvas id="ram-chart"></canvas>
+      </div>
+      <div class="chart-box">
+        <div class="chart-title">Decode speed <span class="dim">(t/s)</span></div>
+        <canvas id="decode-chart"></canvas>
+      </div>
+      <div class="chart-box">
+        <div class="chart-title">VRAM usage <span class="dim">(system)</span></div>
+        <canvas id="vram-chart"></canvas>
+      </div>
+      <div class="chart-box">
+        <div class="chart-title">Prompt processing speed <span class="dim">(t/s · n_token prefill)</span></div>
+        <canvas id="prefill-chart"></canvas>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" id="events">
+    <h2>Events <span class="dim">· commits · milestones · escalations · continues · permissions</span></h2>
+    <div class="tl-head"><span class="tag">type</span><span class="st">state</span><span class="time">time (local)</span><span class="session">session</span><span class="detail">detail</span></div>
+    <ul id="timeline-list" class="tl"></ul>
+  </section>
+
+  <section class="card" id="devices">
+    <h2>Hawk notifications</h2>
+    <div class="dev-add">
+      <span class="dim">Channel:</span>
+      <input id="ntfy-topic" type="text" placeholder="ntfy channel name" maxlength="64" spellcheck="false">
+      <button id="btn-save-topic" class="btn" type="button">Save</button>
+      <span class="dim mono" id="ntfy-sub"></span>
+    </div>
+    <div class="dev-add">
+      <span class="dim">Subscribe from any phone or browser (any network) — replies sent there are routed back to the matching session.</span>
+      <button id="btn-test-ntfy" class="btn" type="button">Test push</button>
+      <button id="btn-clear-all" class="btn" type="button" hidden>Clear all</button>
+      <span class="dim dev-msg" id="dev-msg"></span>
+    </div>
+    <div class="notify-kinds">
+      <span class="dim">Push to phone (web always shows all):</span>
+      <span id="notify-kinds-box" class="notify-kinds-box"></span>
+    </div>
+    <div id="notify-pending" class="notify-pending"></div>
+    <div class="tl-head ntfy-head"><span class="tag">type</span><span class="time">time (local)</span><span class="detail">detail</span></div>
+    <ul id="notify-log" class="tl"></ul>
+  </section>
+</main>
+
+<footer>
+  <span class="dim mono" id="footer">local dashboard · read via state.json / git / sqlite</span>
+</footer>
+<div class="theme-toggle" role="group" aria-label="Style">
+  <button id="theme-classic" class="tt-btn active" type="button">Classic</button>
+  <button id="theme-modern" class="tt-btn" type="button">Modern</button>
+</div>
+<button id="btn-gear" class="gear-btn" type="button" title="Settings" aria-label="Settings">⚙</button>
+<div id="settings-panel" class="settings-panel" hidden>
+  <div class="settings-panel-head">
+    <h2>Settings</h2>
+    <button id="btn-close-settings" class="btn" type="button">✕</button>
+  </div>
+  <section class="card">
+    <h3>Hawk timings</h3>
+    <div class="settings-row" id="settings-fields"></div>
+  </section>
+  <section class="card" id="kill-card">
+    <h3>Llama kill on degradation</h3>
+    <div class="settings-row" id="kill-settings-fields"></div>
+  </section>
+  <div class="settings-actions">
+    <span id="settings-msg" class="dim"></span>
+    <button id="btn-save-settings" class="btn" type="button">Save settings</button>
+  </div>
+</div>
+<script src="app.js"></script>
+<script>
+(function () {
+  var KEY = "hawk_theme";
+  var btns = { classic: document.getElementById("theme-classic"),
+               modern: document.getElementById("theme-modern") };
+  function apply(t) {
+    document.documentElement.dataset.theme = t;
+    for (var k in btns) if (btns[k]) btns[k].classList.toggle("active", k === t);
+    try { localStorage.setItem(KEY, t); } catch (e) {}
+    // canvases size from their CSS box; redraw at the new size
+    if (typeof renderCharts === "function") requestAnimationFrame(renderCharts);
+  }
+  apply(document.documentElement.dataset.theme);
+  for (var k in btns) if (btns[k]) btns[k].addEventListener("click", apply.bind(null, k));
+})();
+</script>
+</body>
+</html>
