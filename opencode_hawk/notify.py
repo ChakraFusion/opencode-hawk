@@ -29,8 +29,8 @@ import urllib.request
 import uuid
 from urllib.parse import quote
 
-from coordinator import log, load_config, extract_choices
-import coordinator as _hawk
+from .coordinator import log, load_config, extract_choices
+from . import coordinator as _hawk
 
 NOTIFY_LOG_CAP = 500
 # eid dedupe memory; must cover every event inside the dashboard's subagent
@@ -293,17 +293,6 @@ def record_event(cfg, kind: str, title: str, body: str, eid: str = "",
             st["pushed_eids"] = ids[-PUSHED_EIDS_CAP:]
         _save_push_state(st)
     return sent
-
-
-def _latin1_safe(s: str) -> str:
-    """http.client encodes HTTP header values as latin-1; a non-ASCII title
-    (e.g. the '…' ellipsis we append to long titles) would raise and kill the
-    whole ntfy POST. Map the horizontal ellipsis to '...' (preserves intent)
-    and replace any other char that can't encode in latin-1 with '?'. The body
-    is sent UTF-8, so only headers need this."""
-    s = str(s or "")
-    s = s.replace("\u2026", "...")
-    return s.encode("latin-1", "replace").decode("latin-1")
 
 
 def _post_ntfy(cfg, title: str, body: str, tags: str = "",

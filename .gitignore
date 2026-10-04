@@ -34,3 +34,8 @@ __pycache__/
 .playwright-mcp/
 .vscode/
 .idea/
+
+# Packaging build output
+build/
+dist/
+*.egg-info/

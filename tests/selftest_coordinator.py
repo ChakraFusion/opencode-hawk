@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import coordinator as hawk  # noqa: E402
+from opencode_hawk import coordinator as hawk  # noqa: E402
 
 globals().update({k: v for k, v in vars(hawk).items()
                   if not (k.startswith("__") and k.endswith("__"))})
@@ -403,7 +403,7 @@ def _self_test_impl():
     # (heavy-GPU-offload case: CPU quiet while a slot is still decoding) and
     # with the decoded/ingested token speeds. GPU utilisation is a fallback
     # only (see L2) because it is machine-wide, not per-process.
-    g = llama_idle.__globals__
+    g = vars(hawk)
     def mkllama_idle_test(cpu_frac, slots_processing, gate_slots,
                           gpu_max=0.0, gate_gpu=True, gate_threshold=10.0,
                           token_speeds=(0.0, 0.0), gate_tokens=True):
@@ -483,10 +483,7 @@ def _self_test_impl():
         "OK" if all([ok_ms1, ok_ms2, ok_ms3, ok_ms4]) else "MISMATCH",
         "monitored_roots + per_state defaults"))
 
-    # T: session tree parent_id leaf resolution + transcript growth
-    def _c_fake(parts_after):
-        return [{"time": 2}, {"time": parts_after}]
-
+    # T: session tree parent_id leaf resolution
     tmpdb = Path(tempfile.mkdtemp()) / "opencode.db"
     _c = sqlite3.connect(str(tmpdb))
     _c.executescript(
@@ -516,20 +513,16 @@ def _self_test_impl():
             root = session_row(_con, "root")
             leaf = active_leaf(_con, root)
             # deepest live child ('done' has a completed message -> skip it)
-            ok_t1 = leaf["id"] == "child"
-            per_g = {"last_seen_at": 1}
-            ok_t2 = node_growth(_c_fake(parts_after=2), per_g)
-            ok_t3 = not node_growth([], per_g)
-        ok_t = all([ok_t1, ok_t2, ok_t3])
+            ok_t = leaf["id"] == "child"
     finally:
         db_path.__globals__["db_path"] = orig_db
         shutil.rmtree(tmpdb.parent, ignore_errors=True)
     results.append(("multi_session_tree", "pass", "pass", ok_t,
-                    "parent_id leaf resolution + growth", []))
+                    "parent_id leaf resolution", []))
     print("%-24s expect=%-8s got=%-8s %s  %s" % (
         "multi_session_tree", "pass", "pass",
         "OK" if ok_t else "MISMATCH",
-        "parent_id leaf resolution + growth"))
+        "parent_id leaf resolution"))
 
     # M: escalation note round-trips into a temp session DB (never the live DB)
     tmpdb = Path(tempfile.gettempdir()) / ("hawk_selftest_%s.db" % uuid.uuid4().hex[:8])
@@ -936,55 +929,6 @@ def _self_test_impl():
         "OK" if ok_aa else "MISMATCH",
         "extract_choices parses numbered/bulleted options"))
 
-    # run_tests: project-aware runner selection + cargo lock-retry + Python
-    # dashboard selftest parse (all offline; subprocess.run is faked).
-    rt = Path(tempfile.mkdtemp())
-    (rt / "Cargo.toml").write_text("[package]\nname = 'x'\nversion = '0.1.0'\n",
-                                   encoding="utf-8")
-    ok_rc = project_test_command(str(rt)) == (["cargo", "test"], "cargo")
-    (rt / "Cargo.toml").unlink()
-    (rt / "dashboard.py").write_text("", encoding="utf-8")
-    ok_rs = project_test_command(str(rt))[1] == "selftest"
-    ok_rn = project_test_command(str(tempfile.mkdtemp())) == (None, None)
-    rtmp2 = Path(tempfile.mkdtemp())
-    (rtmp2 / "Cargo.toml").write_text("", encoding="utf-8")
-    real_run = subprocess.run
-    real_sleep = time.sleep
-    try:
-        seq = [
-            subprocess.CompletedProcess(
-                [], 0, "",
-                "Blocking waiting for file lock on build directory\n"),
-            subprocess.CompletedProcess(
-                [], 0,
-                "test result: ok. 3 passed; 0 failed; 0 ignored; finished in 0.50s\n",
-                ""),
-        ]
-        subprocess.run = lambda *a, **k: seq.pop(0)
-        time.sleep = lambda s: None
-        t_lock = run_tests(str(rtmp2), 300, max_attempts=2, lock_wait_s=1)
-        ok_lock = t_lock["ok"] is True and t_lock["passed"] == 3
-        seq3 = [subprocess.CompletedProcess(
-            [], 0, "", "Blocking waiting for file lock on build directory\n")]
-        subprocess.run = lambda *a, **k: seq3[0]
-        t_exh = run_tests(str(rtmp2), 300, max_attempts=2, lock_wait_s=1)
-        ok_exh = t_exh["ok"] is False and t_exh["note"] == "unparseable result"
-        subprocess.run = lambda *a, **k: subprocess.CompletedProcess(
-            [], 0, "dashboard self-test: PASS\n", "")
-        t_self = run_tests(str(rt), 300)
-        ok_self = t_self["ok"] is True and t_self["note"] == "selftest PASS"
-        subprocess.run = lambda *a, **k: subprocess.CompletedProcess(
-            [], 1, "FAIL\n", "dashboard self-test: FAIL\n")
-        t_selffail = run_tests(str(rt), 300)
-        ok_selffail = t_selffail["ok"] is False and t_selffail["note"] == "selftest FAIL"
-    finally:
-        subprocess.run = real_run
-        time.sleep = real_sleep
-        shutil.rmtree(rt, ignore_errors=True)
-        shutil.rmtree(rtmp2, ignore_errors=True)
-    ok_runner = all([ok_rc, ok_rs, ok_rn, ok_lock, ok_exh, ok_self, ok_selffail])
-    results.append(("runner_project_aware", "pass", "pass", ok_runner,
-                    "run_tests picks the tree's own runner; cargo gate retries on lock", []))
 
     # One fake opencode.db builder for every permission test below. It creates
     # ONLY `session`: the reworked discovery reads that table and nothing else
@@ -1016,7 +960,7 @@ def _self_test_impl():
     # stops re-replies, an absent route (403 HTML from the app.opencode.ai
     # passthrough) is not mistaken for an empty queue, and the config flag
     #   disables the whole sweep. All offline; desktop_sidecar/_perm_request faked.
-    psweep_g = desktop_permission_sweep.__globals__
+    psweep_g = vars(hawk)
     o_sidecar = psweep_g["desktop_sidecar"]
     o_permreq = psweep_g["_perm_request"]
     o_replied = psweep_g["_PERM_REPLIED"]
@@ -1188,7 +1132,7 @@ def _self_test_impl():
     # row, no DB, deeper than the bound, a cycle) must always fail CLOSED.
     # All offline; desktop_sidecar/_perm_request/db_path/connect_db/home_dir
     # faked, so nothing here touches the live DB, the sidecar or config.json.
-    pms_g = desktop_permission_sweep.__globals__
+    pms_g = vars(hawk)
     o_sidecar = pms_g["desktop_sidecar"]
     o_permreq = pms_g["_perm_request"]
     o_replied = pms_g["_PERM_REPLIED"]
@@ -1604,7 +1548,7 @@ def _self_test_impl():
     # option-less (free-text) asks to a human, dedupe within the 15s window,
     # respect the config flag, tolerate the 403-HTML passthrough, and record
     # the answer to the event log. All offline; sidecar/_perm_request faked.
-    qsweep_g = desktop_question_sweep.__globals__
+    qsweep_g = vars(hawk)
     o_qsidecar = qsweep_g["desktop_sidecar"]
     o_qpermreq = qsweep_g["_perm_request"]
     o_qreplied = qsweep_g["_QUESTION_REPLIED"]

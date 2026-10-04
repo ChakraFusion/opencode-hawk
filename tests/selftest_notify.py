@@ -21,8 +21,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import notify  # noqa: E402
-import coordinator as hawk  # noqa: E402
+from opencode_hawk import notify  # noqa: E402
+from opencode_hawk import coordinator as hawk  # noqa: E402
 
 PASS = 0
 FAIL = 0
@@ -670,23 +670,8 @@ def test_delete_ops():
         urllib.request.urlopen = orig2
 
 
-# ------------------------------------------- T1b _latin1_safe header helper
-def test_latin1_safe():
-    check("latin1_safe: ellipsis maps to three dots",
-          notify._latin1_safe("start…end") == "start...end")
-    check("latin1_safe: ASCII unchanged",
-          notify._latin1_safe("hello world") == "hello world")
-    check("latin1_safe: latin-1 char (é) unchanged",
-          notify._latin1_safe("café") == "café")
-    check("latin1_safe: non-latin-1 char replaced with ?",
-          notify._latin1_safe("coffee ☕") == "coffee ?")
-    check("latin1_safe: empty/None -> empty",
-          notify._latin1_safe("") == "" and notify._latin1_safe(None) == "")
-
-
 def main():
     test_kinds_enabled()
-    test_latin1_safe()
     test_record_event_gates()
     test_llama_kind()
     test_cooldown()

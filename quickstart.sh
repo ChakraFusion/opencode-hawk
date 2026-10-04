@@ -14,10 +14,8 @@ echo "Using: $("$PY" --version)"
 
 # first run: create config.json from the template
 if [ ! -f config.json ]; then
-    cp config.example.json config.json
-    echo "[setup] Created config.json from config.example.json."
-    "$PY" -c "import coordinator as c; cfg = c.load_config(); print('[setup] ntfy topic for this install:', c.ensure_ntfy_topic(cfg) or cfg['notify']['ntfy']['topic'])"
-    echo "        Subscribe to that topic in the ntfy app to get phone alerts."
+    "$PY" -c "import psutil" >/dev/null 2>&1 || "$PY" -m pip install --user -r requirements.txt
+    "$PY" -m opencode_hawk init
     echo "        Edit config.json (at least project_dir), then re-run."
     exit 0
 fi
@@ -25,10 +23,10 @@ fi
 # dependency check
 "$PY" -c "import psutil" >/dev/null 2>&1 || "$PY" -m pip install --user -r requirements.txt
 
-echo "[1/2] monitor   : $PY coordinator.py --monitor --interval 3"
-nohup "$PY" coordinator.py --monitor --interval 3 >monitor.out 2>&1 &
-echo "[2/2] dashboard : $PY dashboard.py --port 8765 --open"
-nohup "$PY" dashboard.py --port 8765 --open >dashboard.out 2>&1 &
+echo "[1/2] monitor   : $PY -m opencode_hawk monitor --interval 3"
+nohup "$PY" -m opencode_hawk monitor --interval 3 >monitor.out 2>&1 &
+echo "[2/2] dashboard : $PY -m opencode_hawk dashboard --port 8765 --open"
+nohup "$PY" -m opencode_hawk dashboard --port 8765 --open >dashboard.out 2>&1 &
 
 echo
 echo "Hawk is running. Dashboard: http://127.0.0.1:8765"

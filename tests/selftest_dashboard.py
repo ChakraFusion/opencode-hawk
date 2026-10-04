@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import dashboard as dash  # noqa: E402
+from opencode_hawk import dashboard as dash  # noqa: E402
 
 globals().update({k: v for k, v in vars(dash).items()
                   if not (k.startswith("__") and k.endswith("__"))})
@@ -68,14 +68,14 @@ def self_test():
     db.execute("INSERT INTO part VALUES ('p1','m1','ses','2000','2000','{\"type\":\"text\",\"text\":\"done. STOP: VERIFIED\\nRESULT: PASS tests=444\"}')")
     db.execute("INSERT INTO part VALUES ('p2','m1','ses','3000','3000','{\"type\":\"reasoning\",\"text\":\"planning\"}')")
     db.execute("INSERT INTO message VALUES ('m2','ses','4000','{\"role\":\"assistant\"}','4000')")
-    db.execute("INSERT INTO part VALUES ('p3','m2','ses','5000','5000','{\"type\":\"text\",\"text\":\"## Objective\\n- Implement chunk C8.4b popups\\nSTOP: VERIFIED\"}')")
+    db.execute("INSERT INTO part VALUES ('p3','m2','ses','5000','5000','{\"type\":\"text\",\"text\":\"## Objective\\n- Implement chunk C8.4b popups\\nSTOP: DONE\"}')")
     db.execute("INSERT INTO message VALUES ('m3','ses','6000','{\"role\":\"assistant\"}','6000')")
     db.execute("INSERT INTO part VALUES ('p4','m3','ses','7000','7000','{\"type\":\"text\",\"text\":\"\\\"[coordinator] Milestone verified. Continue ... STOP: VERIFIED\\\"\"}')")
     ms = milestone_events(db, "ses")
     check("milestone_events", len(ms) == 2 and ms[0]["kind"] == "milestone"
           and ms[0]["ok"] and ms[0]["tests"] == 444 and ms[0]["time"] == 2000
           and ms[0]["title"] == "STOP: VERIFIED"
-          and ms[1]["title"] == "Implement chunk C8.4b popups"
+          and ms[1]["title"] == "Implement chunk C8.4b popups" and ms[1]["ok"]
           and ms[0]["sid"] == "ses")
 
     # All-sessions aggregation: empty session_id spans every session, while a
@@ -273,7 +273,7 @@ def self_test():
     old_home = coordinator.home_dir
     coordinator.home_dir = lambda: tmp
     try:
-        import notify
+        from opencode_hawk import notify
         cfg = coordinator.load_config()
         cfg.setdefault("notify", {})["ntfy"] = {
             "topic": "hawk-test", "server": "https://ntfy.sh",
@@ -787,7 +787,7 @@ def self_test():
         shutil.rmtree(tmp, ignore_errors=True)
 
     # llama_restart: due-reason computation (pure)
-    import llama_restart
+    from opencode_hawk import llama_restart
     check("llama_restart_not_due",
           not llama_restart.due_reason(100000, 90000, 60, False)["due"])
     check("llama_restart_time_due",
@@ -859,7 +859,7 @@ def self_test():
     coordinator.home_dir = lambda: tmp6
     orig_dbp6 = coordinator.db_path
     coordinator.db_path = lambda: tmpdb6
-    import notify as notify6
+    from opencode_hawk import notify as notify6
     orig_npost = notify6._post_ntfy
     pushes6 = []
 
@@ -918,7 +918,7 @@ def self_test():
     coordinator.home_dir = lambda: tmp8
     orig_dbp8 = coordinator.db_path
     coordinator.db_path = lambda: tmpdb8
-    import notify as notify8
+    from opencode_hawk import notify as notify8
     orig_npost8 = notify8._post_ntfy
     pushes8 = []
 
@@ -1333,7 +1333,7 @@ def self_test():
         (_tmpd / LLAMA_LOG_FN).write_text("x" * 1000)
         _saved = {}
         try:
-            import llama_restart as _lr
+            from opencode_hawk import llama_restart as _lr
             _saved = {
                 "llama_pid": coordinator.llama_pid,
                 "load_config": coordinator.load_config,
@@ -1399,7 +1399,7 @@ def self_test():
         shutil.rmtree(tmpd, ignore_errors=True)
 
     # ntfy delete helpers: engine stubbed, local-log sync verified
-    import notify as _n
+    from opencode_hawk import notify as _n
     orig_hm = coordinator.home_dir
     orig_cfg = coordinator.load_config
     orig_del = _n.delete_message
