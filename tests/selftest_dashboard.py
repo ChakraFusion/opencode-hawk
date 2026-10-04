@@ -68,14 +68,14 @@ def self_test():
     db.execute("INSERT INTO part VALUES ('p1','m1','ses','2000','2000','{\"type\":\"text\",\"text\":\"done. STOP: VERIFIED\\nRESULT: PASS tests=444\"}')")
     db.execute("INSERT INTO part VALUES ('p2','m1','ses','3000','3000','{\"type\":\"reasoning\",\"text\":\"planning\"}')")
     db.execute("INSERT INTO message VALUES ('m2','ses','4000','{\"role\":\"assistant\"}','4000')")
-    db.execute("INSERT INTO part VALUES ('p3','m2','ses','5000','5000','{\"type\":\"text\",\"text\":\"## Objective\\n- Implement chunk C8.4b popups\\nSTOP: VERIFIED\"}')")
+    db.execute("INSERT INTO part VALUES ('p3','m2','ses','5000','5000','{\"type\":\"text\",\"text\":\"## Objective\\n- Implement chunk C8.4b popups\\nSTOP: DONE\"}')")
     db.execute("INSERT INTO message VALUES ('m3','ses','6000','{\"role\":\"assistant\"}','6000')")
     db.execute("INSERT INTO part VALUES ('p4','m3','ses','7000','7000','{\"type\":\"text\",\"text\":\"\\\"[coordinator] Milestone verified. Continue ... STOP: VERIFIED\\\"\"}')")
     ms = milestone_events(db, "ses")
     check("milestone_events", len(ms) == 2 and ms[0]["kind"] == "milestone"
           and ms[0]["ok"] and ms[0]["tests"] == 444 and ms[0]["time"] == 2000
           and ms[0]["title"] == "STOP: VERIFIED"
-          and ms[1]["title"] == "Implement chunk C8.4b popups"
+          and ms[1]["title"] == "Implement chunk C8.4b popups" and ms[1]["ok"]
           and ms[0]["sid"] == "ses")
 
     # All-sessions aggregation: empty session_id spans every session, while a

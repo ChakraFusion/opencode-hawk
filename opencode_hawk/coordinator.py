@@ -83,30 +83,22 @@ CONFIG_DEFAULTS = {
     "stalled_turn_minutes": 15,  # an unfinished turn silent this long counts as stopped
     "auto_accept_external_dirs": True,  # outermost gate for the Desktop permission sweep; a per-session monitored_sessions + auto_accept filter still applies
     "auto_answer_questions": True,  # auto-select the "(Recommended)" option (else first) for pending question-tool asks
+    # The injected prompts are deliberately generic: no plan file names and no claims about approvals, so they fit
+    # any workflow. Workflow-specific wording (plan locations, approval rules) belongs in config.json.
     "continue_message": (
-        "The user has approved all pending plans and next steps, including "
-        "authorization to commit changes as each milestone passes its gates. "
-        "No further approval is required. Implement the plan: start with the "
-        "next unstarted milestone in the project's plan/spec documents "
-        "(SPEC.md, BUILD_PLAN.md, Implementation_Progress.md, and any others "
-        "in the repo root) and work through it until its acceptance criteria "
-        "are met, your verify gates pass (build, test, lint, fmt), and a "
-        "commit exists. Then move on to the following milestones until the "
-        "full plan is complete instead of stopping early. Only pause for a "
-        "real blocker or a human decision you genuinely need - reply STOP: "
-        "BLOCKED or STOP: NEEDS_DECISION for those cases. End with STOP: DONE "
-        "only when EVERY milestone and step in the plan is complete."
+        "You stopped. Check your plan and the work done so far. If any step is "
+        "still open, continue with the next one and work until it is complete "
+        "and verified, then go on with the following steps instead of stopping "
+        "early. Only pause for a real blocker or a decision a human must make: "
+        "reply STOP: BLOCKED <reason> or STOP: NEEDS_DECISION <question>. "
+        "Reply STOP: DONE only when every step of the plan is complete."
     ),
-    "approve_pending_plans": False,  # grant already inline in continue_message
+    "approve_pending_plans": False,  # opt-in: prefix the prompts with an explicit "plans approved" grant
     "done_confirm_message": (
-        "The user has approved all pending plans and next steps, including "
-        "authorization to commit changes as each milestone passes its gates. "
-        "No further approval is required. Before confirming with STOP: DONE, "
-        "re-check the project's plan/spec documents and verify EVERY "
-        "milestone and open step is complete: acceptance criteria satisfied, "
-        "tests green, commit present. If any step remains open, reply with "
-        "what remains to be done instead of STOP: DONE and continue working "
-        "on it."
+        "You replied STOP: DONE. Before confirming, check your plan once more: "
+        "is every step complete and verified? If anything is still open, say "
+        "what remains and continue working on it. Otherwise reply STOP: DONE "
+        "again."
     ),
     "confirm_install_cli": False,
     "continue_via_attach": True,  # prefer Desktop sidecar so the GUI streams live
@@ -143,13 +135,6 @@ CONFIG_DEFAULTS = {
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def ts_str(ms) -> str:
-    try:
-        return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    except Exception:
-        return str(ms)
 
 
 # Append handle for home_dir()/"monitor.log", keyed by the resolved path so a
@@ -598,27 +583,6 @@ def session_messages(con, sid):
     return out
 
 
-def session_todos(con, session_id: str) -> list[dict]:
-    """Unchecked (active) task list for the session: any todo whose status is
-    still pending/in_progress (i.e. not completed/cancelled/archived)."""
-    ACTIVE = ("pending", "in_progress")
-    rows = con.execute(
-        "SELECT content, status, priority FROM todo "
-        "WHERE session_id=? AND status IN ('pending','in_progress') ORDER BY position",
-        (session_id,),
-    ).fetchall()
-    return [{"content": c, "status": s, "priority": p} for c, s, p in rows]
-
-
-def session_todo_total(con, session_id: str) -> int:
-    """Total tasks tracked in the plan (ALL statuses, not just active). This lets
-    the rule engine tell 'the whole plan is checked off' apart from 'no tasks
-    are tracked at all' — the two cases both show zero open tasks."""
-    row = con.execute(
-        "SELECT COUNT(*) FROM todo WHERE session_id=?", (session_id,)).fetchone()
-    return int(row[0]) if row else 0
-
-
 def last_part_time(parts) -> int:
     return max((p["time"] for p in parts), default=0)
 
@@ -682,17 +646,6 @@ def active_leaf(con, root: dict, max_depth: int = 3) -> dict:
             continue
         break
     return node
-
-
-def node_growth(parts, per: dict) -> bool:
-    """True when the transcript gained a part after the last time we saw it."""
-    if not parts:
-        return False
-    return last_part_time(parts) > int(per.get("last_seen_at") or 0)
-
-
-def progress_since(parts, since_ms) -> bool:
-    return any(p["time"] > since_ms for p in parts)
 
 
 # ── Transcript analysis ──────────────────────────────────────────────────────
@@ -788,66 +741,6 @@ def git(project_dir, *args):
 def git_head(project_dir) -> str:
     rc, out, _ = git(project_dir, "rev-parse", "HEAD")
     return out if rc == 0 else ""
-
-
-def project_test_command(project_dir):
-    """Pick the test-gate invocation for a project by its de-facto shape.
-    Cargo.toml -> cargo test (Rust tree); dashboard.py -> the hawk dashboard's
-    own --self-test (Python); otherwise None = no gate applies to this tree."""
-    root = Path(project_dir)
-    if (root / "Cargo.toml").exists():
-        return (["cargo", "test"], "cargo")
-    if (root / "dashboard.py").exists():
-        return ([sys.executable, "-X", "utf8", "dashboard.py", "--self-test"],
-                "selftest")
-    return (None, None)
-
-
-def run_tests(project_dir, timeout, max_attempts=3, lock_wait_s=10) -> dict:
-    """Run the gate tests for a project. Cargo runs retry on build-lock
-    contention (concurrent `cargo test` from a sibling worker would otherwise
-    surface as an unparseable result); non-Rust trees use their own runner."""
-    cmd, kind = project_test_command(project_dir)
-    if cmd is None:
-        return {"ok": True, "passed": 0, "failed": -1,
-                "note": "no test runner detected (gate skipped)"}
-    log("running %s (gate)..." % " ".join(cmd))
-    for attempt in range(1, max_attempts + 1):
-        try:
-            res = subprocess.run(
-                cmd, cwd=project_dir, capture_output=True, text=True,
-                timeout=timeout, creationflags=creation_flags(),
-            )
-            out = res.stdout + "\n" + res.stderr
-        except subprocess.TimeoutExpired:
-            return {"ok": False, "passed": 0, "failed": -1,
-                    "note": "timeout (%ds)" % timeout}
-        if kind == "cargo":
-            m = re.search(r"test result: ok\.\s+(\d+) passed;\s*(\d+) failed", out)
-            if m:
-                passed, failed = int(m.group(1)), int(m.group(2))
-                return {"ok": failed == 0, "passed": passed,
-                        "failed": failed, "note": ""}
-            if "test result: FAILED" in out or re.search(r"error\[E\d", out):
-                return {"ok": False, "passed": 0, "failed": -1,
-                        "note": "compile/test failure"}
-            if attempt < max_attempts and re.search(
-                    r"Blocking waiting for file lock", out, re.I):
-                log("cargo test lock contention (attempt %d/%d); "
-                    "retrying in %ds" % (attempt, max_attempts, lock_wait_s))
-                time.sleep(lock_wait_s)
-                continue
-            return {"ok": False, "passed": 0, "failed": -1,
-                    "note": "unparseable result"}
-        # kind == "selftest": dashboard.py --self-test
-        if res.returncode == 0 and "self-test: PASS" in out:
-            return {"ok": True, "passed": 1, "failed": -1,
-                    "note": "selftest PASS"}
-        if "self-test: FAIL" in out:
-            return {"ok": False, "passed": 0, "failed": -1,
-                    "note": "selftest FAIL"}
-        return {"ok": False, "passed": 0, "failed": -1,
-                "note": "selftest unparseable"}
 
 
 # ── Continue injection ───────────────────────────────────────────────────────
@@ -2496,8 +2389,8 @@ def write_escalation(session, project_dir, reason, rule_hits, analysis, cfg) -> 
     lines.append("\n## Recent tool output tail")
     lines.append("```\n%s\n```" % (analysis["tool_blob"][-2000:] or "(none)"))
     lines.append("\n## What to do")
-    lines.append("- Read the transcript; if this was a genuine milestone completion, "
-                 "reply `continue` manually, or add the missing evidence (commit / STOP: VERIFIED).")
+    lines.append("- Read the transcript; if the work is genuinely complete, reply `continue` "
+                 "manually (or let the worker end with STOP: DONE).")
     lines.append("- If a decision is required, make it, then let the worker continue.")
     with open(path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
@@ -2520,19 +2413,6 @@ def _model_field(session) -> dict:
         m = {}
     return {"providerID": m.get("providerID", "llama.cpp"),
             "modelID": m.get("id") or m.get("modelID", "")}
-
-
-def build_escalation_note(session, reason, rule_hits, esc_path) -> str:
-    stamp = datetime.now().astimezone().isoformat(timespec="minutes")
-    hits = ", ".join(rule_hits) if rule_hits else "(none)"
-    return (
-        "[hawk escalation] %s — the local milestone coordinator stopped auto-"
-        "continuing this session.\nReason: %s\nRules: %s\nFull report: %s\n"
-        "If this is a genuine milestone completion, reply `continue`; "
-        "otherwise add the missing evidence (commit / STOP: VERIFIED) or make "
-        "the required decision."
-        % (stamp, reason, hits, esc_path)
-    )
 
 
 def write_plan_done(session, project_dir, reason, rule_hits, analysis, cfg) -> Path:

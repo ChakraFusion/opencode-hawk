@@ -295,17 +295,6 @@ def record_event(cfg, kind: str, title: str, body: str, eid: str = "",
     return sent
 
 
-def _latin1_safe(s: str) -> str:
-    """http.client encodes HTTP header values as latin-1; a non-ASCII title
-    (e.g. the '…' ellipsis we append to long titles) would raise and kill the
-    whole ntfy POST. Map the horizontal ellipsis to '...' (preserves intent)
-    and replace any other char that can't encode in latin-1 with '?'. The body
-    is sent UTF-8, so only headers need this."""
-    s = str(s or "")
-    s = s.replace("\u2026", "...")
-    return s.encode("latin-1", "replace").decode("latin-1")
-
-
 def _post_ntfy(cfg, title: str, body: str, tags: str = "",
                 actions=None, kind: str = "alert", eid: str = "",
                 meta: dict = None) -> bool:

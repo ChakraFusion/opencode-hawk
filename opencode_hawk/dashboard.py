@@ -31,13 +31,6 @@ def utcms() -> int:
     return int(time.time() * 1000)
 
 
-def iso(ms: int) -> str:
-    try:
-        return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    except Exception:
-        return ""
-
-
 # ── control write (the ONLY write path) ────────────────────────────────────────
 # Note: user-editable hawk timings (poll_minutes / idle_minutes /
 # stalled_turn_minutes) are written via /api/settings to config.json — the
@@ -184,7 +177,7 @@ def short(s: str, maxlen: int = 80) -> str:
     return s
 
 
-def stop_title(body: str, kind: str = "VERIFIED") -> str:
+def stop_title(body: str, kind: str = "DONE") -> str:
     """Derive a human-readable milestone title from the STOP message body.
     Prefers the '## Objective' bullet, falls back to the first content line."""
     lines = [l.strip() for l in body.splitlines()]
@@ -282,10 +275,11 @@ def milestone_events(con, session_id: str, since_ms: int = 0) -> list[dict]:
     """Model-reported build milestones. A milestone is an ASSISTANT message
     whose FINAL content line carries the STOP marker — the literal end-of-turn
     signal. Prose that merely QUOTES the marker mid-message (diagnosis notes,
-    hawk escalation summaries that quote 'STOP: VERIFIED', decision write-ups)
+    hawk escalation summaries that quote a STOP line, decision write-ups)
     used to leak in as false milestones because the marker was searched
     anywhere in the body; it is now anchored to the last line so those are
-    dropped.
+    dropped. Markers: STOP: DONE | NEEDS_DECISION | BLOCKED; the older
+    STOP: VERIFIED still counts as a completed milestone.
 
     An empty `session_id` aggregates across ALL sessions (the web frontend's
     "All sessions" view). `since_ms` narrows the scan to recent parts (the
@@ -319,8 +313,8 @@ def milestone_events(con, session_id: str, since_ms: int = 0) -> list[dict]:
     evs = []
     RESULT_LINE = re.compile(r"^RESULT:\s*PASS(?:\s+tests=\d+)?\s*$")
     LAST_STOP = re.compile(
-        r"^STOP:\s*(VERIFIED|NEEDS_DECISION|BLOCKED)(?:\s+\S+)*$|"
-        r"STOP:\s*(VERIFIED|NEEDS_DECISION|BLOCKED)\s*$")
+        r"^STOP:\s*(DONE|VERIFIED|NEEDS_DECISION|BLOCKED)(?:\s+\S+)*$|"
+        r"STOP:\s*(DONE|VERIFIED|NEEDS_DECISION|BLOCKED)\s*$")
     for mid, (role, body, tc, psess) in msgs.items():
         if role != "assistant":
             continue
@@ -344,7 +338,7 @@ def milestone_events(con, session_id: str, since_ms: int = 0) -> list[dict]:
         evs.append({"kind": "milestone", "id": "%s-%d" % (kind, tc), "mid": mid,
                     "time": tc, "sid": psess or "",
                     "title": stop_title(body, kind),
-                    "detail": body.strip()[:220], "ok": kind == "VERIFIED", "tests": tests})
+                    "detail": body.strip()[:220], "ok": kind in ("DONE", "VERIFIED"), "tests": tests})
     return evs
 
 
@@ -2800,31 +2794,6 @@ def _purge_old(con) -> None:
 
 
 _db_total_tokens_cache: tuple = (0, 0.0)
-
-
-def _db_total_tokens() -> int:
-    """Sum of all sessions' tokens_input + tokens_output + tokens_reasoning from
-    the opencode DB — the same source the per-subagent event/notify counts use,
-    so the webui 'Total Tokens' figure lines up with them. Cached 30s to avoid
-    repeated scans of the multi-GB DB."""
-    global _db_total_tokens_cache
-    now = time.time()
-    if now - _db_total_tokens_cache[1] < 30:
-        return _db_total_tokens_cache[0]
-    total = _db_total_tokens_cache[0]  # fall back to last known value on error
-    try:
-        con = sqlite3.connect(str(coordinator.db_path()), timeout=30)
-        try:
-            r = con.execute(
-                "SELECT COALESCE(SUM(tokens_input),0)+COALESCE(SUM(tokens_output),0)"
-                "+COALESCE(SUM(tokens_reasoning),0) FROM session").fetchone()
-            total = int(r[0] or 0) if r else 0
-        finally:
-            con.close()
-    except Exception:
-        pass
-    _db_total_tokens_cache = (total, now)
-    return total
 
 
 def telemetry_history(window_s: int, target: int = TELE_TARGET_POINTS,
