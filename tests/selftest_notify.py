@@ -9,17 +9,20 @@ Hermetic: monkey-patches the home dir, config loader, ntfy HTTP layer,
 urlopen, and the reply queue so the real home state, config.json, ntfy
 service, and live sessions are never touched.
 
-Run:  python selftest_notify.py     (exit 0 = all pass)
+Run:  python tests/selftest_notify.py     (exit 0 = all pass)
 """
 import json
 import shutil
+import sys
 import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
 
-import notify
-import coordinator as hawk
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import notify  # noqa: E402
+import coordinator as hawk  # noqa: E402
 
 PASS = 0
 FAIL = 0
