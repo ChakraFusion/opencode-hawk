@@ -134,9 +134,9 @@ traffic is to your ntfy server, and only if a topic is configured.
 ## Tests
 
 ```bat
-python coordinator.py --self-test
-python dashboard.py --self-test
-python selftest_notify.py
+python tests/selftest_coordinator.py
+python tests/selftest_dashboard.py
+python tests/selftest_notify.py
 ```
 
 ## License

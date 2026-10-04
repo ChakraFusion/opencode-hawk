@@ -21,8 +21,8 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: pip install -r requirements.txt
       - name: coordinator self-test
-        run: python coordinator.py --self-test
+        run: python tests/selftest_coordinator.py
       - name: dashboard self-test
-        run: python dashboard.py --self-test
+        run: python tests/selftest_dashboard.py
       - name: notify self-test
-        run: python selftest_notify.py
+        run: python tests/selftest_notify.py
