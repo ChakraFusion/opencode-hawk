@@ -240,8 +240,31 @@ def log_debug(msg: str) -> None:
 
 
 # ── State / config ───────────────────────────────────────────────────────────
+_USER_HOME: Path | None = None
+
+
 def home_dir() -> Path:
-    return Path(os.environ.get("COORD_HOME") or Path(__file__).resolve().parent)
+    """Folder for config.json, state and logs.
+
+    $COORD_HOME when set; else the repository root when running from a source
+    checkout (pyproject.toml next to the package); else a per-user folder:
+    %APPDATA%\\opencode-hawk on Windows, $XDG_CONFIG_HOME/opencode-hawk
+    (~/.config/opencode-hawk) elsewhere."""
+    env = os.environ.get("COORD_HOME")
+    if env:
+        return Path(env)
+    root = Path(__file__).resolve().parent.parent
+    if (root / "pyproject.toml").exists():
+        return root
+    global _USER_HOME
+    if _USER_HOME is None:
+        if os.name == "nt":
+            base = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+        else:
+            base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+        _USER_HOME = base / "opencode-hawk"
+        _USER_HOME.mkdir(parents=True, exist_ok=True)
+    return _USER_HOME
 
 
 def load_json(path: Path, fallback):
@@ -2739,8 +2762,13 @@ def evaluate(cfg, session, parts, messages, state):
 
 # ── Poll pass ────────────────────────────────────────────────────────────────
 def self_test():
-    """Run the self-test scenarios in tests/selftest_coordinator.py."""
-    sys.path.insert(0, str(Path(__file__).resolve().parent / "tests"))
+    """Run the scenarios in tests/selftest_coordinator.py (source checkout only)."""
+    tests = Path(__file__).resolve().parent.parent / "tests"
+    if not (tests / "selftest_coordinator.py").exists():
+        print("self-test: tests/ not found (they ship with the source checkout, "
+              "not the installed package)")
+        return 1
+    sys.path.insert(0, str(tests))
     import selftest_coordinator
     return selftest_coordinator.self_test()
 
@@ -3092,7 +3120,7 @@ def _poll_worker(cfg, state, args):
         log("poll error: %s" % e)
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(description="self-check local-agent coordinator")
     ap.add_argument("--once", action="store_true", help="one poll pass (default)")
     ap.add_argument("--monitor", action="store_true", help="poll loop")
@@ -3104,7 +3132,7 @@ def main():
                     help="run synthetic rule-engine scenarios and exit")
     ap.add_argument("--install-task", action="store_true",
                     help="print the scheduler entry (schtasks / cron) to run every N minutes")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     if args.self_test:
         sys.exit(self_test())
@@ -3121,16 +3149,15 @@ def main():
     state = load_state()
 
     if args.install_task:
-        py = shutil.which("python") or sys.executable
-        script = Path(__file__).resolve()
+        py = sys.executable
         every = cfg.get("poll_minutes", DEFAULT_POLL_MINUTES)
         if os.name != "nt":
             print("# add to `crontab -e`:")
-            print("*/%d * * * * %s %s --once" % (every, py, script))
+            print("*/%d * * * * %s -m opencode_hawk poll" % (every, py))
             return 0
         print('schtasks /Create /F /TN "HawkCoordinator" /SC MINUTE /MO %d '
-              '/TR "\\"%s\\" \\"%s\\" --once" '
-              '/RL LIMITED' % (every, py, script))
+              '/TR "\\"%s\\" -m opencode_hawk poll" '
+              '/RL LIMITED' % (every, py))
         return 0
 
     if args.monitor:

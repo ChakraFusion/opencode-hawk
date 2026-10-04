@@ -3,7 +3,7 @@
 # quickstart.sh, matched by script name in the command line.
 cd "$(dirname "$0")"
 found=0
-for pid in $(pgrep -f "python[0-9.]* .*(coordinator|dashboard)\.py" || true); do
+for pid in $(pgrep -f "python[0-9.]* .*(opencode_hawk|coordinator\.py|dashboard\.py)" || true); do
     echo "killing PID $pid: $(tr '\0' ' ' </proc/"$pid"/cmdline 2>/dev/null)"
     kill "$pid" 2>/dev/null && found=$((found + 1))
 done

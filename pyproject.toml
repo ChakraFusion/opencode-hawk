@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opencode-hawk"
+version = "0.2.0"
+description = "Coordinator that keeps long-running, multi-agent OpenCode workflows moving: auto-continue, llama-server watchdog, ntfy phone alerts and a local dashboard."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "ChakraFusion" }]
+requires-python = ">=3.10"
+dependencies = ["psutil>=5.9"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Environment :: Web Environment",
+  "Topic :: Software Development",
+]
+
+[project.urls]
+Homepage = "https://github.com/ChakraFusion/opencode-hawk"
+Issues = "https://github.com/ChakraFusion/opencode-hawk/issues"
+
+[project.scripts]
+hawk = "opencode_hawk.cli:main"
+
+[tool.setuptools]
+packages = ["opencode_hawk"]
+
+[tool.setuptools.package-data]
+opencode_hawk = ["web/*", "config.example.json", "opencode-plugin/*"]

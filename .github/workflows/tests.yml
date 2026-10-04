@@ -33,15 +33,21 @@ jobs:
       - name: linux probes self-test
         if: always()
         run: python tests/selftest_linux.py
-      - name: smoke (dry-run poll + dashboard endpoints)
+      - name: install the package (pip install .)
+        if: always()
+        run: pip install .
+      - name: smoke (installed `hawk`: init, dry-run poll, dashboard endpoints)
         if: always()
         shell: bash
         run: |
           export COORD_HOME="$RUNNER_TEMP/hawk-home"
           mkdir -p "$COORD_HOME"
-          cp config.example.json "$COORD_HOME/config.json"
-          python coordinator.py --once --dry-run
-          python dashboard.py --port 8799 > "$RUNNER_TEMP/dash.log" 2>&1 &
+          cd "$RUNNER_TEMP"   # run the installed package, not the checkout
+          hawk --version
+          hawk init
+          test -f "$COORD_HOME/config.json"
+          hawk poll --dry-run
+          hawk dashboard --port 8799 > "$RUNNER_TEMP/dash.log" 2>&1 &
           for i in $(seq 1 30); do curl -sf -o /dev/null http://127.0.0.1:8799/ && break; sleep 1; done
           for path in / /api/state /api/timeline; do
             code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 "http://127.0.0.1:8799$path")

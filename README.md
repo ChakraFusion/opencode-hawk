@@ -58,44 +58,49 @@ Built and tested with **OpenCode v1** (1.18.x).
 
 ## Quick start
 
-Windows:
+Install with [pipx](https://pipx.pypa.io) (Windows and Linux):
 
-```bat
-git clone https://github.com/ChakraFusion/opencode-hawk.git
-cd opencode-hawk
-quickstart.bat
+```sh
+pipx install git+https://github.com/ChakraFusion/opencode-hawk.git
+hawk init
 ```
 
-Linux:
+`hawk init` creates `config.json` and generates a **private ntfy topic** for this
+install (`hawk-` followed by 12 random digits). Then:
+
+1. Open the `config.json` it printed and set `project_dir` to the repository your
+   agent works in.
+2. Subscribe to the printed topic in the ntfy app. Treat the topic name like a
+   password: anyone who knows it can read and send messages on it.
+3. Start Hawk with `hawk run`: the monitor and the dashboard, with the dashboard
+   opened in your browser. Ctrl+C stops both.
+
+Update with `pipx upgrade opencode-hawk`.
+
+### Commands
+
+| Command | What it does |
+|---|---|
+| `hawk init` | Create `config.json` and the ntfy topic (keeps an existing config) |
+| `hawk run` | Monitor + dashboard (`--interval N` minutes, `--port P`, `--no-open`) |
+| `hawk monitor` | The poll loop only (`--interval`, `--dry-run`, `--session-id`) |
+| `hawk poll` | One pass, e.g. from Task Scheduler or cron (`--dry-run`) |
+| `hawk dashboard` | The web dashboard only (`--port`, `--open`) |
+| `hawk install-task` | Print the `schtasks` (Windows) or crontab (Linux) entry for `hawk poll` |
+| `hawk where` | Show the folders Hawk uses |
+
+### From a source checkout
 
 ```sh
 git clone https://github.com/ChakraFusion/opencode-hawk.git
 cd opencode-hawk
-./quickstart.sh
+pip install -r requirements.txt
+python -m opencode_hawk init
+python -m opencode_hawk run
 ```
 
-On the first run, the quickstart script creates `config.json` from
-`config.example.json` and generates a **private ntfy topic** for this install
-(`hawk-` followed by 12 random digits). Then:
-
-1. Open `config.json` and set `project_dir` to the repository your agent works in.
-2. Subscribe to the printed topic in the ntfy app. Treat the topic name like a
-   password: anyone who knows it can read and send messages on it.
-3. Run the quickstart script again. It starts the monitor and the dashboard and
-   opens the dashboard in your browser.
-
-`quick_kill.bat` / `./quick_kill.sh` stops both.
-
-Manual start:
-
-```bat
-python coordinator.py --monitor --interval 3
-python dashboard.py --port 8765 --open
-```
-
-Other modes: `coordinator.py --once` (single pass, e.g. from Task Scheduler or
-cron), `--dry-run` (print the verdict without acting), `--install-task` (print a
-`schtasks` command on Windows or a crontab line on Linux), and `--self-test`.
+Or use `quickstart.bat` / `./quickstart.sh`, which open the monitor and the
+dashboard in their own windows; `quick_kill.bat` / `./quick_kill.sh` stops both.
 
 ## Configuration
 
@@ -123,8 +128,10 @@ from the dashboard.
 | `notify.ntfy.server` | `https://ntfy.sh` | ntfy server (self-hosted works too) |
 | `notify.ntfy.kinds` | `escalation, plan_done, test` | Which events are pushed to the phone |
 
-Environment variables: `COORD_HOME` (folder for config and state; default is
-the script folder), `OPENCODE_DB`, `OPENCODE_BIN`.
+Where `config.json`, state and logs live (`hawk where` prints it): `COORD_HOME`
+when set; in a source checkout the repository folder; otherwise
+`%APPDATA%\opencode-hawk` on Windows and `~/.config/opencode-hawk` on Linux.
+Other environment variables: `OPENCODE_DB`, `OPENCODE_BIN`.
 
 ## Platform notes
 

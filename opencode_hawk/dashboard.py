@@ -3663,7 +3663,7 @@ def serve(port=DEFAULT_PORT, open_browser=False, bind="127.0.0.1") -> int:
     return 0
 
 
-def main() -> int:
+def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="hawk coordinator dashboard")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
     ap.add_argument("--listen", default="127.0.0.1",
@@ -3671,7 +3671,7 @@ def main() -> int:
                          "notify reply endpoint on your LAN)")
     ap.add_argument("--open", action="store_true", help="open the default browser")
     ap.add_argument("--self-test", action="store_true")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     if args.self_test:
         return self_test()
     new_topic = coordinator.ensure_ntfy_topic(coordinator.load_config())
@@ -3681,8 +3681,13 @@ def main() -> int:
 
 
 def self_test():
-    """Run the checks in tests/selftest_dashboard.py."""
-    sys.path.insert(0, str(Path(__file__).resolve().parent / "tests"))
+    """Run the scenarios in tests/selftest_dashboard.py (source checkout only)."""
+    tests = Path(__file__).resolve().parent.parent / "tests"
+    if not (tests / "selftest_dashboard.py").exists():
+        print("self-test: tests/ not found (they ship with the source checkout, "
+              "not the installed package)")
+        return 1
+    sys.path.insert(0, str(tests))
     import selftest_dashboard
     return selftest_dashboard.self_test()
 
