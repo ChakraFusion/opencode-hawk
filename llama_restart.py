@@ -23,8 +23,8 @@ restart only at a session idle point right after a compaction; we additionally
 refuse while llama slot 0 is busy, so no in-flight request is ever killed.
 
 Respawn reuses the LIVE process cmdline/cwd/env (psutil), so server settings
-never drift (the .bat files in E:\\llama-... are stale examples); a graceful
-HTTP /shutdown is attempted first, taskkill only as the force fallback.
+never drift; a graceful HTTP /shutdown is attempted first, a forced kill
+(taskkill / SIGKILL) only as the fallback.
 """
 
 import json
@@ -366,9 +366,13 @@ def _graceful_shutdown(cfg, pid) -> bool:
         coordinator.log_debug("llama_restart: graceful shutdown timed out, "
                               "taskkill /F %d" % pid)
         try:
-            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                           capture_output=True, timeout=15,
-                           creationflags=coordinator.creation_flags())
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                               capture_output=True, timeout=15,
+                               creationflags=coordinator.creation_flags())
+            else:
+                import hawk_linux
+                hawk_linux.kill_tree(pid)
         except Exception as e:
             coordinator.log_debug("llama_restart taskkill: %s" % e)
         time.sleep(2.0)

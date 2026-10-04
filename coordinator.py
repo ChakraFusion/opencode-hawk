@@ -53,6 +53,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+import hawk_linux
+
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
@@ -107,8 +109,6 @@ CONFIG_DEFAULTS = {
         "on it."
     ),
     "confirm_install_cli": False,
-    "restart_desktop_before_continue": False,
-    "desktop_exe": "",              # path to the opencode Desktop exe (restart_desktop_before_continue only); empty = never restart
     "continue_via_attach": True,  # prefer Desktop sidecar so the GUI streams live
     "llama_pid": 0,               # 0 = auto-detect the llama-server process by name
     "llama_api_port": 1234,       # where llama-server serves its OpenAI API (/slots, /metrics)
@@ -123,7 +123,7 @@ CONFIG_DEFAULTS = {
     "llama_gpu_cache_s": 5.0,     # how long to cache a GPU-util sample in state
     "llama_task_tracking": True,  # hawk captures llama-server task ids for provider-truth activity (design 2026-09-23); False disables the tailer thread
     "stall_idle_confirm_gap_s": 30,  # re-check llama busy-ness this many seconds after the first busy reading; busy only counts if BOTH samples are busy (kills short own-harness blips on the shared server)
-    "gpu_vram_total_mb": 16384,   # GPU VRAM total (MB) that pins the VRAM chart Y-axis + "used/total" %. 0 = auto-detect via DXGI. Default matches the RX 9060 XT (16 GB).
+    "gpu_vram_total_mb": 0,       # GPU VRAM total (MB) that pins the VRAM chart Y-axis + "used/total" %. 0 = auto-detect
     "re_stall_minutes": 45,     # min gap between self-check prompts for a session
                                 # that keeps stopping without replying STOP: DONE
     "record_escalations_to_session": True,  # also write each escalation into the session transcript DB
@@ -316,10 +316,6 @@ def validate_config(cfg: dict) -> list[str]:
     if not (cfg.get("project_dir") or "").strip():
         problems.append("config: project_dir is empty - set it in config.json "
                         "(git commit + dirty-tree checks will be skipped)")
-    if (cfg.get("restart_desktop_before_continue") or False) \
-            and not (cfg.get("desktop_exe") or "").strip():
-        problems.append("config: restart_desktop_before_continue is on but "
-                        "desktop_exe is empty - restarts will never fire")
     n = cfg.get("notify") or {}
     ntfy = n.get("ntfy") or {}
     if ntfy and not str(ntfy.get("topic") or "").strip():
@@ -832,35 +828,6 @@ def run_tests(project_dir, timeout, max_attempts=3, lock_wait_s=10) -> dict:
 
 
 # ── Continue injection ───────────────────────────────────────────────────────
-def restart_desktop(cfg) -> bool:
-    """Kill + relaunch the opencode Desktop app between milestones.
-
-    The hawk becomes the single driver once the (plugin-loading) Desktop is
-    restarted; this runs after a milestone is verified and BEFORE the next
-    continue is injected, so the running session is never interrupted mid-turn.
-    Returns True if a restart happened, False if skipped (no exe / not running).
-    """
-    exe = (cfg.get("desktop_exe") or "").strip()
-    if not exe or not os.path.exists(exe):
-        log("desktop restart skipped: desktop_exe not found (%r)" % exe)
-        return False
-    tl = subprocess.run(["tasklist", "/FI", "IMAGENAME eq OpenCode.exe"],
-                        capture_output=True, text=True, creationflags=creation_flags())
-    if "OpenCode.exe" not in tl.stdout:
-        log("desktop restart skipped: OpenCode.exe not running")
-        return False
-    log("restarting OpenCode Desktop (between milestones)...")
-    subprocess.run(["taskkill", "/IM", "OpenCode.exe", "/F"],
-                   capture_output=True, text=True, creationflags=creation_flags())
-    time.sleep(4)
-    flags = creation_flags()
-    subprocess.Popen([exe], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                     stderr=subprocess.DEVNULL, close_fds=True, creationflags=flags)
-    time.sleep(8)
-    log("OpenCode Desktop restarted")
-    return True
-
-
 def find_opencode() -> str | None:
     if os.environ.get("OPENCODE_BIN"):
         p = Path(os.environ["OPENCODE_BIN"])
@@ -874,6 +841,9 @@ def find_opencode() -> str | None:
 def find_desktop_server() -> str | None:
     """Return the opencode Desktop sidecar URL (http://127.0.0.1:PORT) if one is
     listening, else None. Locale-independent netstat/tasklist parsing."""
+    if os.name != "nt":
+        found = hawk_linux.desktop_sidecar()
+        return found[0] if found else None
     try:
         out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq OpenCode.exe", "/FO", "CSV", "/NH"],
                              capture_output=True, timeout=15,
@@ -927,6 +897,8 @@ def desktop_sidecar():
     except ImportError:
         log_debug("desktop_sidecar: psutil not installed")
         return None
+    if os.name != "nt":
+        return hawk_linux.desktop_sidecar()
     sidecar = find_desktop_server()
     if not sidecar:
         return None
@@ -1455,6 +1427,9 @@ class ProcessTimes:
     """Thin ctypes wrapper to read process CPU + wall time on Windows (stdlib)."""
 
     def __init__(self):
+        self.posix = os.name != "nt"
+        if self.posix:
+            return  # psutil-backed (hawk_linux.process_times)
         import ctypes
         from ctypes import wintypes
         self.ctypes = ctypes
@@ -1486,6 +1461,8 @@ class ProcessTimes:
 
     def sample(self, pid: int):
         """Return (wall_ms, cpu_ms) for the given PID, or None if unavailable."""
+        if self.posix:
+            return hawk_linux.process_times(pid)
         h = self.OpenProcess(0x0400, False, int(pid))
         if not h:
             return None
@@ -1511,6 +1488,9 @@ class ProcessMemIo:
     """ctypes wrapper for process working-set (RAM) and disk IO counters."""
 
     def __init__(self):
+        self.posix = os.name != "nt"
+        if self.posix:
+            return  # psutil-backed (hawk_linux.process_mem_io)
         import ctypes
         from ctypes import wintypes
         self.ctypes = ctypes
@@ -1547,6 +1527,8 @@ class ProcessMemIo:
 
     def sample(self, pid: int):
         """Return (working_set_bytes, io_read_bytes, io_write_bytes) or None."""
+        if self.posix:
+            return hawk_linux.process_mem_io(pid)
         h = self.OpenProcess(0x0400, False, int(pid))  # PROCESS_QUERY_INFORMATION
         if not h:
             return None
@@ -1625,6 +1607,8 @@ def llama_pid(cfg) -> int | None:
     pid = int(cfg.get("llama_pid") or 0)
     if pid:
         return pid
+    if os.name != "nt":
+        return hawk_linux.find_pid("llama-server")
     try:
         out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq llama-server.exe",
                               "/FO", "CSV", "/NH"],
@@ -1662,7 +1646,10 @@ def llama_respawn(cfg, timeout_s=None) -> bool:
         log("LLAMA-DOWN: server already alive (pid %s); skipping respawn"
             % llama_pid(cfg))
         return True
-    bat = cfg.get("llama_bat_path", r"E:\QWen3.8Opencode-VISION-TURBO.bat")
+    bat = (cfg.get("llama_bat_path") or "").strip()
+    if not bat:
+        log("LLAMA-DOWN: llama_bat_path is not set; cannot respawn llama-server")
+        return False
     log("LLAMA-DOWN: respawning via %s" % bat)
     try:
         import llama_restart as _lr
@@ -1675,8 +1662,12 @@ def llama_respawn(cfg, timeout_s=None) -> bool:
     except Exception:
         fh = None
     try:
+        if os.name == "nt":
+            argv = ["cmd", "/c", bat]
+        else:
+            argv = [bat] if os.access(bat, os.X_OK) else ["sh", bat]
         proc = subprocess.Popen(
-            ["cmd", "/c", bat],
+            argv,
             stdout=fh, stderr=subprocess.STDOUT,
             creationflags=creation_flags(),
         )
@@ -1979,6 +1970,8 @@ def gpu_engine_max(state=None) -> float:
     performed by one background sampler thread so a stalled PdhCollectQueryData
     (observed under concurrent llama model loads) can never freeze the monitor
     poll; callers always get the latest completed sample (~1s fresh)."""
+    if os.name != "nt":
+        return hawk_linux.gpu_engine_max()
     _ensure_gpu_sampler()
     return _PDH_SAMPLE.get("val", 0.0)
 
@@ -1992,7 +1985,7 @@ def gpu_adapters_usage_mb() -> list:
     enumeration order — the same order the dashboard matches to its
     registry-derived adapter totals. [] when the counter is unavailable."""
     if os.name != "nt":
-        return []
+        return [(g["id"], g["used_mb"]) for g in hawk_linux.gpus()]
     _ensure_gpu_sampler()
     return list(_PDH_SAMPLE.get("gpu_inst") or [])
 
@@ -2003,7 +1996,7 @@ def gpu_adapters_engine_pct() -> list:
     semantics as the all-engine gauge but scoped per adapter. Same LUID order
     as gpu_adapters_usage_mb(). [] when the counter is unavailable."""
     if os.name != "nt":
-        return []
+        return [(g["id"], g["pct"]) for g in hawk_linux.gpus()]
     _ensure_gpu_sampler()
     return list(_PDH_SAMPLE.get("gpu_eng") or [])
 
@@ -2012,9 +2005,10 @@ def physical_disk_active_pct() -> list:
     """Real-time disk activity % per physical disk: [(instance, pct)] where
     pct = 100 - %Idle Time (Task-Manager "Active time" semantics). Instances
     are plain disk indexes (e.g. "0", "1"); the _Total row is dropped. [] when
-    the disk counter is absent (non-Windows / rare failure)."""
+    the disk counter is absent (rare failure). On Linux the instances are
+    disk names (e.g. "nvme0n1") instead of indexes."""
     if os.name != "nt":
-        return []
+        return hawk_linux.disk_active_pct()
     _ensure_gpu_sampler()
     out = []
     for name, idle in _PDH_SAMPLE.get("disk_inst") or []:
@@ -2066,9 +2060,9 @@ def gpu_vram_used_mb() -> float | None:
 
     Backed by the same background PDH sampler as gpu_engine_max(): reads the
     `GPU Adapter Memory(*)\\Dedicated Usage` counter (~1s fresh). None when the
-    counter is unavailable (non-Windows, engine-only PDH mode)."""
+    counter is unavailable (engine-only PDH mode)."""
     if os.name != "nt":
-        return None
+        return hawk_linux.gpu_vram_used_mb()
     _ensure_gpu_sampler()
     return _PDH_SAMPLE.get("vram_mb")
 
@@ -2171,22 +2165,69 @@ def _dxgi_dedicated_vram_mb() -> float | None:
         return None
 
 
+def gpu_adapter_totals() -> list[dict]:
+    """[{name, total_mb}] — one entry per adapter in the video-class registry
+    (WDDM enumeration order): DriverDesc from each subkey, total_mb from the
+    QWORD 'HardwareInformation.qwMemorySize' (the real dedicated VRAM; WMI
+    AdapterRAM is 32-bit capped), 0 for UMA/virtual adapters without one. This
+    mirrors the per-adapter PDH engine rows one-for-one, so the dashboard can
+    pair names/totals positionally. On Linux: one entry per GPU from
+    hawk_linux.gpus(), in the same order as gpu_adapters_usage_mb(). Empty on
+    failure."""
+    out: list[dict] = []
+    if os.name != "nt":
+        return [{"name": g["name"], "total_mb": g["total_mb"]}
+                for g in hawk_linux.gpus()]
+    try:
+        cmd = ('powershell.exe -NoProfile -NonInteractive -Command '
+               '"Get-ChildItem \'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\'
+               'Class\\{4d36e968-e325-11ce-bfc1-08002be10318}\' | '
+               'Where-Object { $_.PSChildName -match \'^\\d{4}$\' } | '
+               'ForEach-Object { $p = Get-ItemProperty $_.PSPath; '
+               '$v = $p.\'HardwareInformation.qwMemorySize\'; '
+               '$s = 0; if ($null -ne $v) { $s = $v }; '
+               '\'{0}|{1}\' -f $p.DriverDesc, $s }"')
+        res = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                             timeout=10).stdout
+        for ln in res.splitlines():
+            ln = ln.strip()
+            if "|" not in ln:
+                continue
+            name, _, size = ln.rpartition("|")
+            try:
+                mb = int(size) / (1024.0 * 1024.0)
+            except ValueError:
+                continue
+            out.append({"name": name.strip(), "total_mb": mb})
+    except Exception:
+        return []
+    return out
+
+
 def gpu_vram_total_mb() -> float:
     """Total GPU VRAM (MB) for pinning the VRAM chart. The config override
     (default 16384) wins when > 0; when set to 0, try DXGI auto-detect; else the
     default. Cached — the total does not change at runtime."""
     if _GVRAM["mb"] is None:
-        val = float(load_config().get("gpu_vram_total_mb", 16384) or 0)
+        val = float(load_config().get("gpu_vram_total_mb", 0) or 0)
         if val > 0:
             _GVRAM["mb"] = val
         else:
-            auto = _dxgi_dedicated_vram_mb()
-            _GVRAM["mb"] = float(auto) if auto is not None else 16384.0
+            if os.name == "nt":
+                auto = _dxgi_dedicated_vram_mb() or max(
+                    (g["total_mb"] for g in gpu_adapter_totals()), default=0) or None
+            else:
+                auto = hawk_linux.gpu_vram_total_mb()
+            # 16 GB only pins the chart axis when no GPU could be detected
+            _GVRAM["mb"] = float(auto) if auto else 16384.0
     return float(_GVRAM["mb"])
 
 
 def system_ram_total_mb() -> float:
     """Total physical RAM (MB) via GlobalMemoryStatusEx. 0 when unavailable."""
+    if _SRAM["mb"] is None and os.name != "nt":
+        _SRAM["mb"] = hawk_linux.ram_total_mb()
     if _SRAM["mb"] is None:
         mb = 0.0
         try:
@@ -2242,7 +2283,7 @@ def system_ram_used_mb() -> float | None:
                         ("_pad", C.c_uint64)]
 
         if os.name != "nt":
-            return None
+            return hawk_linux.ram_used_mb()
         ms = MEMORYSTATUSEx()
         ms.dwLength = C.sizeof(MEMORYSTATUSEx)
         if not C.windll.kernel32.GlobalMemoryStatusEx(C.byref(ms)):
@@ -2882,8 +2923,6 @@ def apply_action(cfg, state, session, project_dir, parts, messages, action,
             if dry_run:
                 log("[dry-run] WOULD INJECT self-check prompt")
                 return 0
-        if cfg.get("restart_desktop_before_continue"):
-            restart_desktop(cfg)
         if not send_continue(cfg, session["id"], project_dir, msg, auto=auto):
             # Delivery failed. Do NOT advance last_evaluated_mid/continues: the
             # session is still pending, so the next poll re-evaluates and retries
@@ -3064,7 +3103,7 @@ def main():
     ap.add_argument("--self-test", action="store_true",
                     help="run synthetic rule-engine scenarios and exit")
     ap.add_argument("--install-task", action="store_true",
-                    help="print the schtasks command to schedule every N minutes")
+                    help="print the scheduler entry (schtasks / cron) to run every N minutes")
     args = ap.parse_args()
 
     if args.self_test:
@@ -3085,6 +3124,10 @@ def main():
         py = shutil.which("python") or sys.executable
         script = Path(__file__).resolve()
         every = cfg.get("poll_minutes", DEFAULT_POLL_MINUTES)
+        if os.name != "nt":
+            print("# add to `crontab -e`:")
+            print("*/%d * * * * %s %s --once" % (every, py, script))
+            return 0
         print('schtasks /Create /F /TN "HawkCoordinator" /SC MINUTE /MO %d '
               '/TR "\\"%s\\" \\"%s\\" --once" '
               '/RL LIMITED' % (every, py, script))

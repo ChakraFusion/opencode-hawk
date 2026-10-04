@@ -47,7 +47,8 @@ Built and tested with **OpenCode v1** (1.18.x).
 
 ## Requirements
 
-- **Windows 10/11.** GPU and process probes and the desktop restart use Windows APIs.
+- **Windows 10/11 or Linux.** On Linux, GPU stats come from the amdgpu driver
+  (AMD) or `nvidia-smi` (NVIDIA); see [Platform notes](#platform-notes).
 - **Python 3.10+** and `psutil` (`pip install -r requirements.txt`)
 - **OpenCode v1** (tested with 1.18.x), either the Desktop app or the CLI. Hawk reads its session database
   (default `~/.local/share/opencode/opencode.db`, override with `OPENCODE_DB`).
@@ -57,23 +58,33 @@ Built and tested with **OpenCode v1** (1.18.x).
 
 ## Quick start
 
+Windows:
+
 ```bat
 git clone https://github.com/ChakraFusion/opencode-hawk.git
 cd opencode-hawk
 quickstart.bat
 ```
 
-On the first run, `quickstart.bat` creates `config.json` from
+Linux:
+
+```sh
+git clone https://github.com/ChakraFusion/opencode-hawk.git
+cd opencode-hawk
+./quickstart.sh
+```
+
+On the first run, the quickstart script creates `config.json` from
 `config.example.json` and generates a **private ntfy topic** for this install
 (`hawk-` followed by 12 random digits). Then:
 
 1. Open `config.json` and set `project_dir` to the repository your agent works in.
 2. Subscribe to the printed topic in the ntfy app. Treat the topic name like a
    password: anyone who knows it can read and send messages on it.
-3. Run `quickstart.bat` again. It starts the monitor and the dashboard in two
-   windows and opens the dashboard in your browser.
+3. Run the quickstart script again. It starts the monitor and the dashboard and
+   opens the dashboard in your browser.
 
-`quick_kill.bat` stops both.
+`quick_kill.bat` / `./quick_kill.sh` stops both.
 
 Manual start:
 
@@ -82,9 +93,9 @@ python coordinator.py --monitor --interval 3
 python dashboard.py --port 8765 --open
 ```
 
-Other modes: `coordinator.py --once` (single pass, e.g. from Task Scheduler),
-`--dry-run` (print the verdict without acting), `--install-task` (print a
-`schtasks` command), and `--self-test`.
+Other modes: `coordinator.py --once` (single pass, e.g. from Task Scheduler or
+cron), `--dry-run` (print the verdict without acting), `--install-task` (print a
+`schtasks` command on Windows or a crontab line on Linux), and `--self-test`.
 
 ## Configuration
 
@@ -104,8 +115,8 @@ from the dashboard.
 | `auto_accept_external_dirs` | `true` | Auto-accept external-directory permission prompts (monitored sessions only) |
 | `auto_answer_questions` | `true` | Auto-answer question-tool prompts |
 | `continue_via_attach` | `true` | Inject through the Desktop sidecar so the GUI streams live |
-| `restart_desktop_before_continue` / `desktop_exe` | `false` / `""` | Restart OpenCode Desktop before continuing |
 | `llama_api_port` | `1234` | llama-server API port |
+| `llama_bat_path` | `""` | Script that starts llama-server (`.bat` on Windows, shell script on Linux); the watchdog uses it to respawn a dead server. Empty = no respawn |
 | `llama_pid` | `0` | 0 = find llama-server by process name |
 | `gpu_vram_total_mb` | `0` | VRAM shown in charts; 0 = auto-detect |
 | `notify.ntfy.topic` | generated | Your private ntfy topic |
@@ -114,6 +125,18 @@ from the dashboard.
 
 Environment variables: `COORD_HOME` (folder for config and state; default is
 the script folder), `OPENCODE_DB`, `OPENCODE_BIN`.
+
+## Platform notes
+
+| | Windows | Linux |
+|---|---|---|
+| GPU load and VRAM | Performance counters (any GPU) | AMD: amdgpu sysfs, no extra tools. NVIDIA: `nvidia-smi` |
+| VRAM used by llama-server | Per-process GPU counters | AMD: the process's DRM fdinfo. NVIDIA: `nvidia-smi` |
+| Disk activity | Performance counters | `psutil` per-disk busy time |
+| RAM stick inventory | WMI | Not shown (needs root) |
+| OpenCode Desktop sidecar | `OpenCode.exe` | Any `opencode*` process that exposes the server credentials |
+
+Linux support is new. Bug reports from real Linux setups are welcome.
 
 ## Agent markers
 
@@ -137,6 +160,7 @@ traffic is to your ntfy server, and only if a topic is configured.
 python tests/selftest_coordinator.py
 python tests/selftest_dashboard.py
 python tests/selftest_notify.py
+python tests/selftest_linux.py
 ```
 
 ## License
