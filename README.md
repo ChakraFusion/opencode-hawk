@@ -189,6 +189,28 @@ python tests/selftest_notify.py
 python tests/selftest_linux.py
 ```
 
+CI runs them on Windows and Ubuntu (Python 3.10 and 3.12) and smoke-tests the
+installed `hawk` command.
+
+## Code layout
+
+| Module | Contents |
+|---|---|
+| `opencode_hawk/cli.py` | The `hawk` command |
+| `coordinator.py` | Config and state, OpenCode session DB access, the self-check rule engine, continue injection, escalations, the monitor loop |
+| `probes.py` | Process, llama-server, GPU, disk and RAM probes (Windows) |
+| `hawk_linux.py` | The Linux versions of those probes |
+| `desktop.py` | OpenCode Desktop sidecar discovery, permission and question auto-handling |
+| `dashboard.py` | The dashboard's HTTP server, timeline and settings |
+| `telemetry.py` / `llama_tasks.py` | Dashboard telemetry sampler and store; llama-server task tracking |
+| `notify.py` | ntfy phone notifications and reply routing |
+| `llama_restart.py` | Planned llama-server restarts |
+| `opencode-plugin/` | The optional OpenCode plugin (`hawk install-plugin`) |
+
+`probes` and `desktop` share `coordinator`'s namespace (they use `core.<name>`),
+and `telemetry` / `llama_tasks` share `dashboard`'s (`dash.<name>`): a patch on
+the main module reaches the split-out code. Import them through the main module.
+
 ## License
 
 [MIT](LICENSE) © ChakraFusion

@@ -403,7 +403,7 @@ def _self_test_impl():
     # (heavy-GPU-offload case: CPU quiet while a slot is still decoding) and
     # with the decoded/ingested token speeds. GPU utilisation is a fallback
     # only (see L2) because it is machine-wide, not per-process.
-    g = llama_idle.__globals__
+    g = vars(hawk)
     def mkllama_idle_test(cpu_frac, slots_processing, gate_slots,
                           gpu_max=0.0, gate_gpu=True, gate_threshold=10.0,
                           token_speeds=(0.0, 0.0), gate_tokens=True):
@@ -960,7 +960,7 @@ def _self_test_impl():
     # stops re-replies, an absent route (403 HTML from the app.opencode.ai
     # passthrough) is not mistaken for an empty queue, and the config flag
     #   disables the whole sweep. All offline; desktop_sidecar/_perm_request faked.
-    psweep_g = desktop_permission_sweep.__globals__
+    psweep_g = vars(hawk)
     o_sidecar = psweep_g["desktop_sidecar"]
     o_permreq = psweep_g["_perm_request"]
     o_replied = psweep_g["_PERM_REPLIED"]
@@ -1132,7 +1132,7 @@ def _self_test_impl():
     # row, no DB, deeper than the bound, a cycle) must always fail CLOSED.
     # All offline; desktop_sidecar/_perm_request/db_path/connect_db/home_dir
     # faked, so nothing here touches the live DB, the sidecar or config.json.
-    pms_g = desktop_permission_sweep.__globals__
+    pms_g = vars(hawk)
     o_sidecar = pms_g["desktop_sidecar"]
     o_permreq = pms_g["_perm_request"]
     o_replied = pms_g["_PERM_REPLIED"]
@@ -1548,7 +1548,7 @@ def _self_test_impl():
     # option-less (free-text) asks to a human, dedupe within the 15s window,
     # respect the config flag, tolerate the 403-HTML passthrough, and record
     # the answer to the event log. All offline; sidecar/_perm_request faked.
-    qsweep_g = desktop_question_sweep.__globals__
+    qsweep_g = vars(hawk)
     o_qsidecar = qsweep_g["desktop_sidecar"]
     o_qpermreq = qsweep_g["_perm_request"]
     o_qreplied = qsweep_g["_QUESTION_REPLIED"]
