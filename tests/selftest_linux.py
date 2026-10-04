@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import hawk_linux as hl  # noqa: E402
+from opencode_hawk import hawk_linux as hl  # noqa: E402
 
 FAILS = []
 

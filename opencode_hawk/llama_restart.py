@@ -40,7 +40,7 @@ try:
 except Exception:  # pragma: no cover - self-test env may lack psutil
     psutil = None
 
-import coordinator  # same dir; run from coordinator/ or with it on sys.path
+from . import coordinator  # same dir; run from coordinator/ or with it on sys.path
 
 STATE_FN = "llama_restart.json"
 LOCK_FN = "llama_restart.lock"
@@ -371,7 +371,7 @@ def _graceful_shutdown(cfg, pid) -> bool:
                                capture_output=True, timeout=15,
                                creationflags=coordinator.creation_flags())
             else:
-                import hawk_linux
+                from . import hawk_linux
                 hawk_linux.kill_tree(pid)
         except Exception as e:
             coordinator.log_debug("llama_restart taskkill: %s" % e)

@@ -21,8 +21,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import notify  # noqa: E402
-import coordinator as hawk  # noqa: E402
+from opencode_hawk import notify  # noqa: E402
+from opencode_hawk import coordinator as hawk  # noqa: E402
 
 PASS = 0
 FAIL = 0

@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import coordinator as hawk  # noqa: E402
+from opencode_hawk import coordinator as hawk  # noqa: E402
 
 globals().update({k: v for k, v in vars(hawk).items()
                   if not (k.startswith("__") and k.endswith("__"))})

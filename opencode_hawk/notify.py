@@ -29,8 +29,8 @@ import urllib.request
 import uuid
 from urllib.parse import quote
 
-from coordinator import log, load_config, extract_choices
-import coordinator as _hawk
+from .coordinator import log, load_config, extract_choices
+from . import coordinator as _hawk
 
 NOTIFY_LOG_CAP = 500
 # eid dedupe memory; must cover every event inside the dashboard's subagent

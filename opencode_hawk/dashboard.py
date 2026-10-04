@@ -19,8 +19,8 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-import coordinator  # same dir; load_state/load_config/connect_db/db_path/git_head/...
-import hawk_linux
+from . import coordinator  # same dir; load_state/load_config/connect_db/db_path/git_head/...
+from . import hawk_linux
 
 DEFAULT_PORT = 8765
 WEB_DIR = Path(__file__).resolve().parent / "web"
@@ -80,7 +80,7 @@ def _setting_fallback(k: str):
         return False
     if k in ("llama_kill_degraded_s", "llama_kill_tps"):
         try:
-            import llama_restart
+            from . import llama_restart
             return llama_restart.DEFAULTS.get(k)
         except Exception:
             return None
@@ -1047,7 +1047,7 @@ _ntfy_channel_cache = {"t": 0.0, "v": []}
 
 
 def ntfy_payload() -> dict:
-    import notify
+    from . import notify
     import time as _t
     cfg = coordinator.load_config()
     n = notify._ntfy_cfg(cfg)
@@ -1077,7 +1077,7 @@ def ntfy_delete(msg_id: str) -> dict:
     row from a previous topic can never be removed by a foreign-topic id."""
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", msg_id):
         raise ValueError("id must be 1-128 chars (letters, digits, - or _)")
-    import notify
+    from . import notify
     cfg = coordinator.load_config()
     topic = notify._ntfy_cfg(cfg)["topic"]
     if not notify.delete_message(cfg, msg_id):
@@ -1102,7 +1102,7 @@ def ntfy_delete_all() -> dict:
     the notification on connected devices but the message STAYS in ntfy's
     pollable history until its cache TTL (12h) expires, so /api/ntfy/cache-
     ids will keep listing ids that were "deleted"."""
-    import notify
+    from . import notify
     r = notify.delete_all(coordinator.load_config())
     # Everything goes except rows whose live message failed to delete (they
     # keep their delete button for a retry).
@@ -1123,7 +1123,7 @@ def ntfy_cache_ids() -> dict:
     their cache TTL (12h on ntfy.sh) expires. Never treat this list as
     "what still needs deleting until empty" — it always lists everything
     published in the TTL window."""
-    import notify
+    from . import notify
     cfg = coordinator.load_config()
     if not notify._ntfy_cfg(cfg)["topic"]:
         return {"ids": []}
@@ -1152,7 +1152,7 @@ def ntfy_prune_local(payload: dict) -> dict:
         DIFFERENT populations for a topic (cache = recent messages, log =
         the dashboard's own history), so cache membership must never be
         used to decide which local rows to drop."""
-    import notify
+    from . import notify
     if payload.get("all") is True:
         return {"ok": True, "pruned": notify.remove_log_entries(lambda _e: True)}
     ids = payload.get("ids") or []
@@ -1400,7 +1400,7 @@ def _llama_anchor_ms() -> int:
     """Wall clock of the log's uptime zero: the spawn time of the current
     llama-server (restart record), else its process start time, else 0."""
     try:
-        import llama_restart
+        from . import llama_restart
         st = llama_restart.load_state()
         if st.get("last_at_ms"):
             return int(st["last_at_ms"])
@@ -1540,7 +1540,7 @@ def _llama_stream_health() -> dict:
             mtime = 0.0
         server_start_s = 0.0
         try:
-            import llama_restart
+            from . import llama_restart
             spec = llama_restart._process_spec(pid)
             if spec and spec.get("started_ms"):
                 server_start_s = spec["started_ms"] / 1000.0
@@ -2163,7 +2163,7 @@ def _event_push_sample():
     escalation / plan_done / continue / confirm_done. Every push goes through
     notify.record_event, which applies the kinds gate, per-kind cooldown and
     eid dedupe, so the two owners can never double-push the same event."""
-    import notify
+    from . import notify
     cfg = coordinator.load_config()
     try:
         pd = str(cfg.get("project_dir") or "")
@@ -3176,7 +3176,7 @@ class WebHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/llama/restart/status":
             try:
-                import llama_restart
+                from . import llama_restart
                 self._send_json(llama_restart.status(coordinator.load_config()))
             except Exception as e:
                 self._send_json({"error": str(e)}, 500)
@@ -3186,7 +3186,7 @@ class WebHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/notify/kinds":
             try:
-                import notify
+                from . import notify
                 cfg = coordinator.load_config()
                 self._send_json({
                     "all": list(notify.EVENT_KINDS),
@@ -3198,7 +3198,7 @@ class WebHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/notify/pending":
             try:
-                import notify
+                from . import notify
                 p = notify.load_pending_route()
                 if p:
                     self._send_json({"pending": True, **p})
@@ -3288,7 +3288,7 @@ class WebHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "bad request"}, st)
                 return
             try:
-                import notify
+                from . import notify
                 if not isinstance(body, dict) or not isinstance(body.get("enabled"), list):
                     raise ValueError("enabled must be a list of kind names")
                 enabled = [k for k in body["enabled"] if k in notify.EVENT_KINDS]
@@ -3325,7 +3325,7 @@ class WebHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "bad request"}, st)
                 return
             try:
-                import notify
+                from . import notify
                 idx = int(body.get("index") or 0)
                 res = notify.resolve_pending_route(coordinator.load_config(), idx)
                 self._send_json(res)
@@ -3360,7 +3360,7 @@ class WebHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/ntfy/test":
             try:
-                import notify
+                from . import notify
                 sent = notify.send_test(coordinator.load_config())
                 self._send_json({"ok": True, "sent": sent})
             except Exception as e:
@@ -3405,7 +3405,7 @@ class WebHandler(BaseHTTPRequestHandler):
         if path == "/api/ntfy/backfill":
             # Recover full bodies for legacy sent entries from the ntfy cache.
             try:
-                import notify
+                from . import notify
                 self._send_json({"ok": True,
                                  **notify.backfill_bodies(coordinator.load_config())})
             except Exception as e:
@@ -3419,7 +3419,7 @@ class WebHandler(BaseHTTPRequestHandler):
             try:
                 if not isinstance(body, dict):
                     raise ValueError("body must be a JSON object")
-                import llama_restart
+                from . import llama_restart
                 reason = str(body.get("reason") or "manual")[:80]
                 dry = bool(body.get("dry_run"))
                 if dry:
@@ -3432,7 +3432,7 @@ class WebHandler(BaseHTTPRequestHandler):
                     # Visibility: make sure the user knows this restart was
                     # intentional (plugin/health/time), not a crash.
                     try:
-                        import notify
+                        from . import notify
                         notify.send_text(coordinator.load_config(),
                                          "llama-server restarted (reason: %s).\n"
                                          "Old PID %s -> new PID %s in %.0fs; "
@@ -3488,7 +3488,7 @@ class WebHandler(BaseHTTPRequestHandler):
             self._send_json({"error": "session and choice required"}, 400)
             return
         try:
-            import notify
+            from . import notify
             notify.queue_reply(sid, choice)
         except Exception as e:
             self._send_json({"error": str(e)}, 500)

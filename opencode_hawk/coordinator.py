@@ -53,7 +53,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-import hawk_linux
+from . import hawk_linux
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -1652,7 +1652,7 @@ def llama_respawn(cfg, timeout_s=None) -> bool:
         return False
     log("LLAMA-DOWN: respawning via %s" % bat)
     try:
-        import llama_restart as _lr
+        from . import llama_restart as _lr
         log_fn = _lr.LOG_FN
     except Exception:
         log_fn = "llama-server.out.log"
@@ -2943,7 +2943,7 @@ def apply_action(cfg, state, session, project_dir, parts, messages, action,
                     "last_evaluated_mid=%s is pending retry (check that OPENCODE_BIN "
                     "points at a working CLI) -> %s" % (last_mid, path))
                 try:
-                    import notify
+                    from . import notify
                     notify.notify_escalation(cfg, session,
                                              reason or "self-check delivery failed (CLI unavailable); will retry",
                                              rule_hits, a, str(path))
@@ -2962,7 +2962,7 @@ def apply_action(cfg, state, session, project_dir, parts, messages, action,
         save_state(state)
         if action == "continue":
             try:
-                import notify
+                from . import notify
                 notify.record_event(
                     cfg, "continue", "Self-check injected",
                     "[hawk] <b>self-check injected</b>\n<i>%s</i>\n\nSession: %s"
@@ -2975,7 +2975,7 @@ def apply_action(cfg, state, session, project_dir, parts, messages, action,
         if action == "confirm_done":
             log("CONFIRMATION ASKED (first STOP: DONE)")
             try:
-                import notify
+                from . import notify
                 a = analyze(parts, messages)
                 notify.notify_escalation(cfg, session, reason, rule_hits, a, "",
                                          kind="confirm_done")
@@ -3007,7 +3007,7 @@ def apply_action(cfg, state, session, project_dir, parts, messages, action,
         # the respawn as handled by it.
         ok = False
         try:
-            import llama_restart
+            from . import llama_restart
             if llama_restart._lock("flow:llama_down"):
                 try:
                     ok = llama_respawn(cfg)
@@ -3018,7 +3018,7 @@ def apply_action(cfg, state, session, project_dir, parts, messages, action,
         except Exception:
             ok = llama_respawn(cfg)
         try:
-            import notify
+            from . import notify
             if ok:
                 notify.send_text(
                     cfg, "[hawk] <b>llama-server auto-restarted</b>\n"
@@ -3057,7 +3057,7 @@ def apply_action(cfg, state, session, project_dir, parts, messages, action,
             if append_session_note(db, session["id"], note, _model_field(session)):
                 log("DONE: recorded in session transcript")
         try:
-            import notify
+            from . import notify
             notify.send_text(
                 cfg, "[hawk] <b>build plan complete</b>\n<i>%s</i>\n\nSession: %s"
                 % (reason, (session.get("title") or "")[:60]),
@@ -3163,7 +3163,7 @@ def main():
                 if tick_now - last_llama_check >= 30.0:
                     last_llama_check = tick_now
                     try:
-                        import llama_restart
+                        from . import llama_restart
                         llama_restart.supervise(load_config())
                     except Exception as e:
                         log("llama supervise error: %s" % e)
@@ -3194,7 +3194,7 @@ def main():
                         # the next tick will retry with the same in-memory state
                         log("state save error: %s" % e)
                 try:
-                    import notify
+                    from . import notify
                     notify.drain_replies(
                         lambda sid, choice: _reply_to_session(cfg, sid, choice))
                     notify.poll_ntfy_replies(
