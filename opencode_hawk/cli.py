@@ -65,6 +65,37 @@ def cmd_dashboard(args) -> int:
     return dashboard.main(argv) or 0
 
 
+PLUGIN_NAME = "local-hawk-llama-restart.ts"
+
+
+def opencode_plugin_dir() -> Path:
+    """OpenCode's global plugin folder: $OPENCODE_CONFIG_DIR/plugins, else ~/.config/opencode/plugins."""
+    import os
+    base = os.environ.get("OPENCODE_CONFIG_DIR")
+    return (Path(base) if base else Path.home() / ".config" / "opencode") / "plugins"
+
+
+def cmd_install_plugin(args) -> int:
+    """Install (or remove) Hawk's llama-restart plugin into OpenCode. The local-* name keeps it out of a harness
+    that is a git repository (machine-local plugins are git-ignored there)."""
+    target_dir = Path(args.dir) if args.dir else opencode_plugin_dir()
+    target = target_dir / PLUGIN_NAME
+    if args.remove:
+        if target.exists():
+            target.unlink()
+            print(f"removed {target}; restart OpenCode to unload it")
+        else:
+            print(f"not installed: {target}")
+        return 0
+    target_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(PACKAGE_DIR / "opencode-plugin" / "llama-restart.ts", target)
+    print(f"installed {target}; restart OpenCode to load it")
+    if (target_dir / "llama-restart.ts").exists():
+        print(f"warning: {target_dir / 'llama-restart.ts'} is an older copy of this plugin; remove it, or every "
+              "restart is requested twice")
+    return 0
+
+
 def cmd_install_task(_args) -> int:
     from . import coordinator
     return coordinator.main(["--install-task"]) or 0
@@ -127,6 +158,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_dashboard)
 
     sub.add_parser("install-task", help="print the Task Scheduler / cron entry").set_defaults(func=cmd_install_task)
+
+    p = sub.add_parser("install-plugin", help="install the llama-restart plugin into OpenCode")
+    p.add_argument("--dir", default=None, help="plugin folder (default: OpenCode's global plugins folder)")
+    p.add_argument("--remove", action="store_true", help="uninstall it")
+    p.set_defaults(func=cmd_install_plugin)
     return ap
 
 

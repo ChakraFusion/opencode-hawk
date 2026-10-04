@@ -87,6 +87,7 @@ Update with `pipx upgrade opencode-hawk`.
 | `hawk poll` | One pass, e.g. from Task Scheduler or cron (`--dry-run`) |
 | `hawk dashboard` | The web dashboard only (`--port`, `--open`) |
 | `hawk install-task` | Print the `schtasks` (Windows) or crontab (Linux) entry for `hawk poll` |
+| `hawk install-plugin` | Install the optional llama-restart plugin into OpenCode (`--remove` uninstalls) |
 | `hawk where` | Show the folders Hawk uses |
 
 ### From a source checkout
@@ -132,6 +133,24 @@ Where `config.json`, state and logs live (`hawk where` prints it): `COORD_HOME`
 when set; in a source checkout the repository folder; otherwise
 `%APPDATA%\opencode-hawk` on Windows and `~/.config/opencode-hawk` on Linux.
 Other environment variables: `OPENCODE_DB`, `OPENCODE_BIN`.
+
+## Optional: restart llama-server at the right moment
+
+llama-server gets slower as a long session fills its context. Hawk can restart it,
+but the least disruptive moment is right after OpenCode compacts a session. An
+OpenCode plugin knows that moment:
+
+```sh
+hawk install-plugin
+```
+
+It installs `local-hawk-llama-restart.ts` into OpenCode's global plugin folder
+(`~/.config/opencode/plugins/`; restart OpenCode once to load it). After a
+compaction it asks the Hawk dashboard whether a restart is due (uptime cadence or
+slow decode at deep context) and triggers it at the next idle moment; the
+dashboard refuses while a request is in flight and restarts the server with its
+exact command line. Without a running dashboard the plugin does nothing. Set
+`HAWK_DASHBOARD_URL` if the dashboard is not on `http://127.0.0.1:8765`.
 
 ## Platform notes
 
