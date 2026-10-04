@@ -4387,7 +4387,9 @@ def self_test():
         check("pdh_disk_live",
               len(_acc) >= 1 and _acc[0][0].isdigit()
               and all(0 <= p <= 100 for _, p in _acc))
-        check("hw_gpus_live", len(_wg) >= 1)
+        # HAWK_SKIP_LIVE_HW=1 (set in CI): hosted runners have no GPU.
+        if not os.environ.get("HAWK_SKIP_LIVE_HW"):
+            check("hw_gpus_live", len(_wg) >= 1)
         # every shown disk is a physical disk with >= 1 GB of storage: the
         # inventory maps each PDH index to its Win32_DiskDrive Size, so the
         # shown count must equal the count of >= 1 GB physical disks
@@ -4397,10 +4399,13 @@ def self_test():
             check("hw_disks_size_filter", len(_wd) == big)
     # live-reading cache: second call inside the TTL window returns the same
     # objects and the cache is a copy (mutating the result must not leak in)
+    # Take fresh baselines here: the live waits above can outlast the TTL on
+    # a slow machine, so the earlier readings may already have expired.
+    _d0, _g0 = hw_disk_activity(), hw_gpus()
     check("hw_disks_cache",
-          hw_disk_activity() == _hw_disks and hw_disk_activity() is not _HW["disks"])
+          hw_disk_activity() == _d0 and hw_disk_activity() is not _HW["disks"])
     check("hw_gpus_cache",
-          hw_gpus() == _hw_gpus and hw_gpus() is not _HW["gpus"])
+          hw_gpus() == _g0 and hw_gpus() is not _HW["gpus"])
 
     # SQLite store + bucket-averaged downsample (isolated temp DB)
     tmp = Path(tempfile.mkdtemp())

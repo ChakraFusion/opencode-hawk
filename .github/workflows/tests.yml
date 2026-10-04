@@ -13,6 +13,7 @@ jobs:
         python: ["3.10", "3.12"]
     env:
       PYTHONIOENCODING: utf-8
+      HAWK_SKIP_LIVE_HW: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
