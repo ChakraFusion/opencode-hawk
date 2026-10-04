@@ -427,6 +427,10 @@ def db_path() -> Path:
 
 # ── DB access ────────────────────────────────────────────────────────────────
 def connect_db(path: Path, attempts=5):
+    # A missing file is not transient (unlike a locked DB): fail at once
+    # instead of spending ~7.5 s in retries on every dashboard request.
+    if not Path(path).exists():
+        raise RuntimeError("cannot open opencode DB %s: file not found" % path)
     uri = "file:" + str(path).replace("\\", "/") + "?mode=ro"
     last = None
     for i in range(attempts):

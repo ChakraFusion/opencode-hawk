@@ -591,12 +591,15 @@ def subagent_events(con, session_id: str, since_ms: int = 0) -> list[dict]:
 
 def timeline_events(project_dir: str, session_id: str, con,
                     since_ms: int = 0) -> list[dict]:
+    # con is None when there is no opencode DB yet (fresh install): the
+    # file-backed events (commits, escalations, permissions) still show.
     evs = (git_log_events(project_dir)
-           + milestone_events(con, session_id, since_ms=since_ms)
            + escalation_events(str(coordinator.home_dir() / "escalations"))
-           + continue_events(con, session_id, since_ms=since_ms)
-           + subagent_events(con, session_id, since_ms=since_ms)
            + permission_events())
+    if con is not None:
+        evs += (milestone_events(con, session_id, since_ms=since_ms)
+                + continue_events(con, session_id, since_ms=since_ms)
+                + subagent_events(con, session_id, since_ms=since_ms))
     evs.sort(key=lambda e: e["time"], reverse=True)
     for e in evs:
         for k in ("title", "detail", "reason"):
@@ -3125,7 +3128,10 @@ class WebHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/timeline":
             try:
-                con = coordinator.connect_db(coordinator.db_path())
+                try:
+                    con = coordinator.connect_db(coordinator.db_path())
+                except RuntimeError:
+                    con = None  # no opencode DB yet: file-backed events only
                 try:
                     cfg = coordinator.load_config()
                     raw = qs.get("session", [cfg.get("session_id") or ""])[0]
@@ -3137,7 +3143,8 @@ class WebHandler(BaseHTTPRequestHandler):
                             cfg.get("project_dir") or "", sid, con,
                             since_ms=utcms() - TIMELINE_SCAN_WINDOW_S * 1000)))
                 finally:
-                    con.close()
+                    if con is not None:
+                        con.close()
             except Exception as e:
                 self._send_json({"error": str(e)}, 500)
             return

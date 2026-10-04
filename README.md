@@ -2,13 +2,17 @@
 
 [![tests](https://github.com/ChakraFusion/opencode-hawk/actions/workflows/tests.yml/badge.svg)](https://github.com/ChakraFusion/opencode-hawk/actions/workflows/tests.yml)
 
-**A coordinator that keeps long-running local [OpenCode](https://opencode.ai) sessions moving while you're away.**
+**A coordinator that keeps long-running, multi-agent [OpenCode](https://opencode.ai) workflows moving while you're away.**
 
-Local models running through llama.cpp are slow, and an agent working on a
-multi-milestone build plan often stops: it finishes a step, waits for a
-permission prompt, asks a question, or the model server degrades. Hawk watches
-the session and nudges it along. It also pings your phone when a human is
-actually needed.
+Hawk is built for **multi-agent OpenCode workflows**: a lead agent works through
+a multi-milestone build plan and dispatches subagents (developer, researcher,
+reviewer, and so on) for the individual steps. On a local model served by
+llama.cpp, such a run takes hours, and it often stops along the way: the lead
+finishes a step, waits for a permission prompt, asks a question, or the model
+server degrades. Hawk watches the whole session tree (lead and subagents) and
+nudges it along. It also pings your phone when a human is actually needed.
+
+Built and tested with **OpenCode v1** (1.18.x).
 
 ![Hawk dashboard, Modern skin](docs/screenshots/dashboard-modern.png)
 
@@ -35,6 +39,9 @@ actually needed.
 - **Phone alerts via [ntfy](https://ntfy.sh).** Escalations and plan-complete
   events go to your phone, and replies from the ntfy app are routed back into
   the session.
+- **Subagent tracking.** It follows the session tree, so a lead that is waiting on
+  a running subagent counts as busy, and every subagent start and finish shows
+  up in the timeline.
 - **Dashboard.** A local web UI (`http://127.0.0.1:8765`) with sessions, events,
   token speed, GPU/VRAM charts, the ntfy channel and settings.
 
@@ -42,7 +49,7 @@ actually needed.
 
 - **Windows 10/11.** GPU and process probes and the desktop restart use Windows APIs.
 - **Python 3.10+** and `psutil` (`pip install -r requirements.txt`)
-- **OpenCode**, either the Desktop app or the CLI. Hawk reads its session database
+- **OpenCode v1** (tested with 1.18.x), either the Desktop app or the CLI. Hawk reads its session database
   (default `~/.local/share/opencode/opencode.db`, override with `OPENCODE_DB`).
 - **Optional:** a local `llama-server` (llama.cpp) for the idle and degradation
   probes and the watchdog. Defaults to port 1234.
