@@ -820,7 +820,10 @@ def self_test():
             llama_restart._unlock = lambda *a, **k: None
         coordinator.llama_slots = lambda cfg: {"is_processing": False}
         llama_restart.urllib.request.urlopen = _no_shutdown
-        llama_restart.subprocess.run = _fake_run
+        llama_restart.subprocess.run = _fake_run  # Windows: taskkill
+        from opencode_hawk import hawk_linux as _hl
+        _saved_kill = _hl.kill_tree
+        _hl.kill_tree = lambda pid: _fake_run()  # Linux: kill_tree
         import time as _t
         _t0 = _t.time()
         _res = llama_restart.restart({"llama_restart_force_after_s": 60, "llama_restart_exit_wait_s": 20}, "test")
@@ -831,6 +834,10 @@ def self_test():
         coordinator.llama_slots = _saved_slots
         llama_restart.urllib.request.urlopen = _saved_urlopen
         llama_restart.subprocess.run = _saved_run
+        try:
+            _hl.kill_tree = _saved_kill
+        except NameError:
+            pass
     check("llama_restart_survives_slow_exit",
           bool(_res.get("ok") and _res.get("pid_new") == 5151 and len(_spawned) == 1 and _took < 15))
     print("  restart result %s in %.1fs" % (_res, _took))
