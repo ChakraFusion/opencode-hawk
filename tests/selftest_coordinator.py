@@ -299,6 +299,26 @@ def _self_test_impl():
     print("%-22s expect=%-9s got=%-9s %s" % ("done_open_detector", "pass",
                                             "pass" if ok_det else "fail", "OK" if ok_det else "MISMATCH"))
 
+    # E10b: phrases real done claims used to hide open work (session evidence, 2026-10-05)
+    ok_ev = (len(hawk.done_open_items(
+                "- ⚠️ Settings screen requires unlocked state\n"
+                "Environment-blocked (not code defects): tray panel\n"
+                "Current GPU state prevents new visual captures\n"
+                "Previous verification confirmed the wizard works\nSTOP: DONE")) == 4
+             and hawk.done_open_items("Nothing is blocked; no blockers.\nSTOP: DONE") == [])
+    results.append(("done_open_evidence", "pass", "pass" if ok_ev else "fail", ok_ev,
+                    "evidence phrases are open items; 'nothing is blocked' is not", []))
+    print("%-22s expect=%-9s got=%-9s %s" % ("done_open_evidence", "pass",
+                                            "pass" if ok_ev else "fail", "OK" if ok_ev else "MISMATCH"))
+    # E10c: a compaction summary quoting STOP: DONE is not a done claim
+    now_c = int(time.time() * 1000)
+    parts_c = [{"time": now_c - 900000, "message_id": "m_sum", "role": "summary", "type": "text",
+                "text": "Summary: the user said end with STOP: DONE only when all is done.", "data": {"type": "text"}}]
+    ok_sum = not hawk.analyze(parts_c, [{"id": "m_sum", "time": now_c - 900000, "role": "assistant"}])["plan_done"]
+    results.append(("done_not_summary", "pass", "pass" if ok_sum else "fail", ok_sum, "summary parts ignored", []))
+    print("%-22s expect=%-9s got=%-9s %s" % ("done_not_summary", "pass", "pass" if ok_sum else "fail",
+                                            "OK" if ok_sum else "MISMATCH"))
+
     # E11: open tasks in the session's own task list block a done claim, even a clean-worded one
     orig_todos = evaluate.__globals__["open_todos"]
     try:
@@ -601,7 +621,11 @@ def _self_test_impl():
     ok_n = ("--auto" in cmd_att and "--auto" in cmd_st
             and "--attach" in cmd_att and "http://127.0.0.1:1" in cmd_att
             and "--session" in cmd_att and "ses_x" in cmd_att
-            and cmd_att[-1] == "MSG" and cmd_st[-1] == "MSG")
+            and cmd_att[-1] == "MSG" and cmd_st[-1] == "MSG"
+            and "--agent" not in cmd_att)
+    # the session's agent is kept (without --agent OpenCode switches to its default agent)
+    cmd_ag = build_continue_cmd(cli_dummy, "http://127.0.0.1:1", "ses_x", "/proj", "MSG", agent="yolo")
+    ok_n = ok_n and cmd_ag[cmd_ag.index("--agent") + 1] == "yolo" and cmd_ag[-1] == "MSG"
     results.append(("continue_auto_flag", "pass", "pass", ok_n,
                     "--auto on both attach and standalone continue commands", []))
     print("%-22s expect=%-9s got=%-9s %s  %s" % (
