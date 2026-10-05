@@ -112,7 +112,7 @@ CONFIG_DEFAULTS = {
     "done_claim_check": True,
     "done_claim_max_rejects": 2,
     "done_open_items_message": (
-        "You replied STOP: DONE, but your own message still names open work:\n"
+        "You replied STOP: DONE, but work is still open (your task list and your own message):\n"
         "{items}\n"
         "A plan is done only when nothing is open. Finish these items and verify "
         "them now; do not reclassify them as minor, documentation-only or "
