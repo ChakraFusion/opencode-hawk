@@ -123,6 +123,7 @@ CONFIG_DEFAULTS = {
     "continue_via_attach": True,  # prefer Desktop sidecar so the GUI streams live
     "llama_pid": 0,               # 0 = auto-detect the llama-server process by name
     "llama_api_port": 1234,       # where llama-server serves its OpenAI API (/slots, /metrics)
+    "llama_bat_path": "",         # script that starts llama-server; used to start it again when it is down
     # llama_idle probe internals — used only to stand down the self-check while
     # a long generation is live (a long decode writes no session parts yet).
     "stall_llama_cpu_frac": 0.10, # min CPU-fraction over the watch window to count as "generating"
@@ -348,6 +349,9 @@ def validate_config(cfg: dict) -> list[str]:
     if ntfy and not str(ntfy.get("topic") or "").strip():
         problems.append("config: notify.ntfy is present but topic is missing - "
                         "ntfy alerts will not send")
+    if not str(cfg.get("llama_bat_path") or "").strip():
+        problems.append("config: llama_bat_path is empty - a llama-server that dies cannot be "
+                        "started again (set it to the script that starts your server)")
     return problems
 
 

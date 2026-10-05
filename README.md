@@ -147,6 +147,7 @@ from the dashboard.
 | `llama_api_port` | `1234` | llama-server API port |
 | `llama_bat_path` | `""` | Script that starts llama-server (`.bat` on Windows, shell script on Linux); the watchdog uses it to respawn a dead server. Empty = no respawn |
 | `llama_pid` | `0` | 0 = find llama-server by process name |
+| `llama_bat_path` | `""` | Script that starts llama-server; Hawk uses it to start a dead server again (empty = it cannot) |
 | `gpu_vram_total_mb` | `0` | VRAM shown in charts; 0 = auto-detect |
 | `notify.ntfy.topic` | generated | Your private ntfy topic |
 | `notify.ntfy.server` | `https://ntfy.sh` | ntfy server (self-hosted works too) |

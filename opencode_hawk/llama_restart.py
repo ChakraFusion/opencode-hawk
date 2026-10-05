@@ -54,6 +54,9 @@ DEFAULTS = {
     "llama_restart_min_active": 5,
     "llama_restart_wait_idle_s": 30,
     "llama_restart_force_after_s": 60,
+    # After a forced kill: how long the process may take to exit (a server with a large host prompt cache
+    # releases tens of GB first; 2026-10-05 it outlived a 2 s wait and the restart gave up with no server).
+    "llama_restart_exit_wait_s": 120,
     "llama_restart_health_timeout_s": 240,
     "llama_restart_lock_ttl_s": 600,
     # Degradation-kill (webUI-configurable): when enabled, a sustained
@@ -350,14 +353,18 @@ def _graceful_shutdown(cfg, pid) -> bool:
     gone."""
     base = coordinator.llama_api_base(cfg)
     force_after = cfg_get(cfg, "llama_restart_force_after_s")
+    accepted = False
     for method in ("POST", "GET"):
         try:
             req = urllib.request.Request(base + "/shutdown", method=method)
             urllib.request.urlopen(req, timeout=5)
+            accepted = True
             break
+        except urllib.error.HTTPError:
+            break  # the server answered but has no /shutdown (llama-server): no point waiting for it
         except Exception:
             continue
-    deadline = time.time() + force_after
+    deadline = time.time() + (force_after if accepted else 0)
     while time.time() < deadline:
         if not _pid_alive(pid):
             return True
@@ -375,7 +382,9 @@ def _graceful_shutdown(cfg, pid) -> bool:
                 hawk_linux.kill_tree(pid)
         except Exception as e:
             coordinator.log_debug("llama_restart taskkill: %s" % e)
-        time.sleep(2.0)
+        exit_deadline = time.time() + cfg_get(cfg, "llama_restart_exit_wait_s")
+        while _pid_alive(pid) and time.time() < exit_deadline:
+            time.sleep(1.0)
     return not _pid_alive(pid)
 
 
@@ -450,10 +459,15 @@ def restart(cfg, reason: str = "manual") -> dict:
             return {"ok": False, "reason": "busy"}
         started = _now_ms()
         ok_shutdown = _graceful_shutdown(cfg, pid)
-        if not ok_shutdown:
-            return {"ok": False, "reason": "shutdown_failed"}
+        if not ok_shutdown and _pid_alive(pid):
+            return {"ok": False, "reason": "shutdown_failed"}  # still running: nothing lost
+        # From here the server is gone: whatever happens, never leave it down.
         new_pid = _respawn(spec)
         if not new_pid:
+            from . import probes
+            if probes.llama_respawn(cfg):
+                return {"ok": True, "healthy": True, "pid_old": pid, "pid_new": coordinator.llama_pid(cfg),
+                        "reason": reason, "via": "llama_bat_path"}
             return {"ok": False, "reason": "respawn_failed"}
         healthy = _wait_healthy(cfg)
         st = {
