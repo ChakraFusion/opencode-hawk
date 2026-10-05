@@ -23,27 +23,42 @@ Built and tested with **OpenCode v1** (1.18.x).
 
 </details>
 
-## What it does
+## Core features
+
+### Smart continue
+
+Hawk keeps a run going without blindly spamming "continue".
 
 - **Auto-continue.** When the worker has stopped and the model is idle, Hawk
   injects a self-check prompt telling the agent to re-check the plan and keep
   going. It never interrupts a turn that is still generating, and sends at
   most one prompt per `re_stall_minutes`.
+- **Subagent-aware.** It follows the session tree, so a lead that is waiting on
+  a running subagent counts as busy, and every subagent start and finish shows
+  up in the timeline.
 - **Confirmed finish.** The build counts as done only when the agent says
   `STOP: DONE` twice, on two separate messages. Hawk asks once to confirm.
 - **Permissions and questions.** It auto-accepts external-directory permission
   prompts and answers question-tool prompts (choosing the "(Recommended)"
   option) for sessions you mark as monitored.
+
+### Easy remote control
+
+- **Phone alerts and replies via [ntfy](https://ntfy.sh).** Escalations and
+  plan-complete events go to your phone. Reply in the ntfy app and Hawk routes
+  the answer back into the session, so you can unblock a run from anywhere. No
+  account and no port forwarding needed; each install gets its own private topic.
+- **Dashboard.** A local web UI (`http://127.0.0.1:8765`) to switch monitoring,
+  auto-accept and auto-continue per session, change settings, and follow the
+  timeline and the ntfy channel.
+
+### Performance monitoring
+
+- **Live telemetry.** Token speed (prefill and decode), context depth, GPU load
+  and VRAM charts, including the VRAM used by `llama-server` itself, on Windows
+  and Linux (AMD and NVIDIA).
 - **llama-server watchdog.** It detects a dead or degraded `llama-server`
   (low decode speed at deep context) and restarts it.
-- **Phone alerts via [ntfy](https://ntfy.sh).** Escalations and plan-complete
-  events go to your phone, and replies from the ntfy app are routed back into
-  the session.
-- **Subagent tracking.** It follows the session tree, so a lead that is waiting on
-  a running subagent counts as busy, and every subagent start and finish shows
-  up in the timeline.
-- **Dashboard.** A local web UI (`http://127.0.0.1:8765`) with sessions, events,
-  token speed, GPU/VRAM charts, the ntfy channel and settings.
 
 ## Requirements
 
