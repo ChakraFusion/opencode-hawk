@@ -614,6 +614,27 @@ def _self_test_impl():
         "OK" if ok_m else "MISMATCH",
         "escalation note written to session DB as synthetic user msg + text part"))
 
+    # N0: `hawk init` on a fresh install creates the (missing) home folder and a private topic
+    import tempfile as _tf
+    from opencode_hawk import cli as _cli
+    _fresh = Path(_tf.mkdtemp(prefix="hawk-init-")) / "opencode-hawk"
+    _old_home = os.environ.get("COORD_HOME")
+    os.environ["COORD_HOME"] = str(_fresh)
+    try:
+        _rc = _cli.cmd_init(None)
+        _cfg = json.loads((_fresh / "config.json").read_text(encoding="utf-8"))
+        ok_init = _rc == 0 and bool(_cfg.get("notify", {}).get("ntfy", {}).get("topic"))
+    except Exception as _e:
+        ok_init = False
+    finally:
+        if _old_home is None:
+            os.environ.pop("COORD_HOME", None)
+        else:
+            os.environ["COORD_HOME"] = _old_home
+        shutil.rmtree(_fresh.parent, ignore_errors=True)
+    results.append(("init_fresh_home", "pass", "pass" if ok_init else "fail", ok_init, "hawk init creates a missing home", []))
+    print("%-22s expect=%-9s got=%-9s %s" % ("init_fresh_home", "pass", "pass" if ok_init else "fail", "OK" if ok_init else "MISMATCH"))
+
     # N: --auto present on both continue paths (attach + standalone)
     cli_dummy = "opencode"
     cmd_att = build_continue_cmd(cli_dummy, "http://127.0.0.1:1", "ses_x", "/proj", "MSG")
