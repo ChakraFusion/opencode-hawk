@@ -954,7 +954,7 @@ def llama_idle_sustained(cfg, state) -> bool:
 
 
 def build_continue_cmd(cli, attach, session_id, project_dir, message, auto=True,
-                       creds=None):
+                       creds=None, agent=""):
     # Both paths pass --auto unless auto=False: "auto-approve permissions that
     # are not explicitly denied", so Hawk-driven continues never block on an
     # access prompt. auto=False (an answer/critical injection) omits it.
@@ -964,6 +964,9 @@ def build_continue_cmd(cli, attach, session_id, project_dir, message, auto=True,
         cmd = [cli, "run", "--attach", attach, "--session", session_id]
     else:
         cmd = [cli, "run", "--session", session_id]
+    if agent:
+        # Keep the session's agent: without --agent the turn runs as OpenCode's default agent.
+        cmd += ["--agent", agent]
     if auto:
         cmd.append("--auto")
     if attach and creds:
@@ -990,7 +993,7 @@ def send_continue(cfg, session_id, project_dir, message, auto=True) -> bool:
     attach = sidecar[0] if sidecar else None
     creds = sidecar[1] if sidecar else None
     cmd = core.build_continue_cmd(cli, attach, session_id, project_dir, message,
-                             auto=auto, creds=creds)
+                             auto=auto, creds=creds, agent=core.session_agent(session_id))
     core.log("injecting continue via %s" %
         ("attach %s" % attach if attach else "standalone server (desktop sidecar not found)"))
     core.log("cmd: %s" % " ".join(cmd[:6]))

@@ -597,6 +597,9 @@ def session_parts(con, sid):
             mm = parse_part_data(md)
             if isinstance(mm, dict):
                 role = mm.get("role")
+                # A compaction summary often quotes "STOP: DONE" from the rules; it is not a done claim.
+                if role == "assistant" and (mm.get("summary") or (mm.get("agent") or mm.get("mode")) == "compaction"):
+                    role = "summary"
         out.append({"time": t, "message_id": mid, "role": role,
                     "type": pd.get("type"), "text": get_text(pd),
                     "data": pd})
@@ -712,7 +715,7 @@ def analyze(parts, messages):
     msg_text = {}
     last_mid = None
     for p in parts:
-        if p.get("role") == "user":
+        if p.get("role") in ("user", "summary"):
             continue
         if p.get("type") != "text" or not p.get("text"):
             continue
@@ -902,6 +905,27 @@ def build_plan_done_note(session, reason, rule_hits, done_path) -> str:
     )
 
 
+def session_agent(session_id) -> str:
+    """The agent the session works with: the newest assistant message's agent
+    (compaction excluded). Injections and notes must carry it: without one,
+    OpenCode switches the session to its default agent (or "build")."""
+    try:
+        con = connect_db(db_path(), attempts=1)
+        try:
+            for (d,) in con.execute(
+                    "SELECT data FROM message WHERE session_id=? ORDER BY time_created DESC LIMIT 40", (session_id,)):
+                md = parse_part_data(d)
+                if isinstance(md, dict) and md.get("role") == "assistant" and not md.get("summary"):
+                    ag = md.get("agent") or md.get("mode")
+                    if ag and ag != "compaction":
+                        return ag
+        finally:
+            con.close()
+    except Exception:
+        pass
+    return ""
+
+
 def append_session_note(db: Path, session_id: str, text: str, model: dict) -> bool:
     """Insert a synthetic user message + text part into the opencode DB so the
     escalation is visible in the session transcript (the same shape opencode
@@ -910,7 +934,7 @@ def append_session_note(db: Path, session_id: str, text: str, model: dict) -> bo
     now = int(time.time() * 1000)
     mid = _gen_opencode_id("msg_")
     pid = _gen_opencode_id("prt_")
-    msg_data = {"role": "user", "time": {"created": now}, "agent": "build", "model": model}
+    msg_data = {"role": "user", "time": {"created": now}, "agent": session_agent(session_id) or "build", "model": model}
     part_data = {"type": "text", "synthetic": True, "text": text,
                  "time": {"start": now, "end": now}}
     try:
@@ -1117,10 +1141,12 @@ _OPEN_WORDS = re.compile(
     r"\b(remaining|remains|still open|open items?|not yet|todo|to-do|deferred|"
     r"skipped|gaps?|missing|not captured|not committed|not implemented|"
     r"not verified|unverified|absent|incomplete|partially|pending|"
-    r"(?:accepted|known) limitations?|follow-ups?|left to do)\b", re.I)
+    r"(?:accepted|known) limitations?|follow-ups?|left to do|"
+    r"blocked|environment[- ]blocked|could not|couldn't|cannot|can't|unable|not tested|untested|prevents?|"
+    r"previous(?:ly)? (?:verif\w*|confirm\w*))\b|\u26a0", re.I)
 _NEGATED = re.compile(
-    r"\b(no|zero|0|none|nothing|without)\b[^.;\n]{0,25}\b(remaining|open|todo|gaps?|missing|"
-    r"pending|deferred|skipped|follow-ups?)\b|"
+    r"\b(no|zero|0|none|nothing|without|not)\b[^.;\n]{0,25}\b(remaining|open|todo|gaps?|missing|"
+    r"pending|deferred|skipped|follow-ups?|blocked)\b|"
     r"\b(remaining|open items?|todo|gaps?|missing|pending|deferred)\b\s*[:=-]?\s*"
     r"(none|0|nothing|n/a)\b", re.I)
 _FRACTION = re.compile(r"(?<![\w/.])(\d{1,4})\s*/\s*(\d{1,4})(?![\w/.])")
