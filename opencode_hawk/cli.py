@@ -26,7 +26,8 @@ def cmd_init(_args) -> int:
     topic = coordinator.ensure_ntfy_topic(cfg) or cfg["notify"]["ntfy"]["topic"]
     print(f"ntfy topic for this install: {topic}")
     print("  subscribe to it in the ntfy app to get phone alerts (treat it like a password)")
-    print(f"next: set project_dir in {cfg_path}, then run `hawk run`")
+    print(f"next: set project_dir and llama_bat_path (the script that starts llama-server) in {cfg_path},")
+    print("      then run `hawk run`")
     return 0
 
 

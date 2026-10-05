@@ -63,7 +63,8 @@ Hawk keeps a run going without blindly spamming "continue".
   and VRAM charts, including the VRAM used by `llama-server` itself, on Windows
   and Linux (AMD and NVIDIA).
 - **llama-server watchdog.** It detects a dead or degraded `llama-server`
-  (low decode speed at deep context) and restarts it.
+  (low decode speed at deep context) and restarts it, using the start script
+  you set as `llama_bat_path`.
 
 ## Requirements
 
@@ -89,7 +90,9 @@ hawk init
 install (`hawk-` followed by 12 random digits). Then:
 
 1. Open the `config.json` it printed and set `project_dir` to the repository your
-   agent works in.
+   agent works in, and `llama_bat_path` to the script that starts your
+   llama-server (without it Hawk cannot start a dead server again; it warns at
+   startup).
 2. Subscribe to the printed topic in the ntfy app. Treat the topic name like a
    password: anyone who knows it can read and send messages on it.
 3. Start Hawk with `hawk run`: the monitor and the dashboard, with the dashboard
@@ -147,7 +150,6 @@ from the dashboard.
 | `llama_api_port` | `1234` | llama-server API port |
 | `llama_bat_path` | `""` | Script that starts llama-server (`.bat` on Windows, shell script on Linux); the watchdog uses it to respawn a dead server. Empty = no respawn |
 | `llama_pid` | `0` | 0 = find llama-server by process name |
-| `llama_bat_path` | `""` | Script that starts llama-server; Hawk uses it to start a dead server again (empty = it cannot) |
 | `gpu_vram_total_mb` | `0` | VRAM shown in charts; 0 = auto-detect |
 | `notify.ntfy.topic` | generated | Your private ntfy topic |
 | `notify.ntfy.server` | `https://ntfy.sh` | ntfy server (self-hosted works too) |
@@ -173,7 +175,9 @@ It installs `local-hawk-llama-restart.ts` into OpenCode's global plugin folder
 compaction it asks the Hawk dashboard whether a restart is due (uptime cadence or
 slow decode at deep context) and triggers it at the next idle moment; the
 dashboard refuses while a request is in flight and restarts the server with its
-exact command line. Without a running dashboard the plugin does nothing. Set
+exact command line; if that start fails, it falls back to `llama_bat_path`, so a
+restart never leaves the server down. Without a running dashboard the plugin does
+nothing. Set
 `HAWK_DASHBOARD_URL` if the dashboard is not on `http://127.0.0.1:8765`.
 
 ## Platform notes
