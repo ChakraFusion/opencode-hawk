@@ -38,6 +38,10 @@ Hawk keeps a run going without blindly spamming "continue".
   up in the timeline.
 - **Confirmed finish.** The build counts as done only when the agent says
   `STOP: DONE` twice, on two separate messages. Hawk asks once to confirm.
+- **Done means done.** If the done message itself still names open work
+  ("7/9 screens", "remaining items", "deferred", "known gaps"), Hawk sends
+  those lines back and the agent keeps working. The confirmation asks for
+  every plan item with its evidence.
 - **Permissions and questions.** It auto-accepts external-directory permission
   prompts and answers question-tool prompts (choosing the "(Recommended)"
   option) for sessions you mark as monitored.
@@ -133,6 +137,9 @@ from the dashboard.
 | `stalled_turn_minutes` | `15` | An unfinished turn silent this long counts as stopped |
 | `re_stall_minutes` | `45` | Minimum gap between self-check prompts for one session |
 | `continue_message` / `done_confirm_message` | built-in | The prompts Hawk injects |
+| `done_claim_check` | `true` | Send back a `STOP: DONE` whose own text names open items |
+| `done_claim_max_rejects` | `2` | Send-backs per run; after that the normal confirmation applies and the done alert flags the open items |
+| `done_open_items_message` | built-in | The send-back prompt (`{items}` = the quoted lines) |
 | `auto_accept_external_dirs` | `true` | Auto-accept external-directory permission prompts (monitored sessions only) |
 | `auto_answer_questions` | `true` | Auto-answer question-tool prompts |
 | `continue_via_attach` | `true` | Inject through the Desktop sidecar so the GUI streams live |

@@ -275,6 +275,30 @@ def _self_test_impl():
         {"done_mid": "msg_old_done",
          "last_injected_at": int(time.time() * 1000) - 60 * 60 * 1000})
 
+    # E7: a STOP: DONE that still names open work is sent back with those lines
+    open_done = ("All verification complete:\n- Tests: 588/588 green\n- GUI: 7/9 screens captured\n"
+                 "Remaining items are documentation-only gaps, none are blockers.\nSTOP: DONE")
+    parts, msgs = mkparts(open_done)
+    run("done_open_rejected", "done_rejected", parts, msgs, {})
+    # E8: the same rejected message waits for the worker's answer (no re-send, no confirm)
+    parts, msgs = mkparts(open_done)
+    run("done_open_waits", "nothing", parts, msgs,
+        {"rejected_done_mid": "msg_test_final", "done_rejects": 1,
+         "last_injected_at": int(time.time() * 1000) - 10 * 60 * 1000})
+    # E9: after done_claim_max_rejects send-backs the normal double-tap applies
+    parts, msgs = mkparts(open_done)
+    run("done_open_max_rejects", "confirm_done", parts, msgs, {"done_rejects": 2})
+    # E10: the detector: open lines found, clean lines (full counts, negations, dates, paths) not
+    ok_det = (hawk.done_open_items(open_done) == [
+                  "GUI: 7/9 screens captured",
+                  "Remaining items are documentation-only gaps, none are blockers."]
+              and hawk.done_open_items("CLI: 42/42 pass\nNo open items, nothing remaining.\n"
+                                       "Remaining: none\nOn 2026/10/04 see docs/a/b.md v1.2/3\nSTOP: DONE") == [])
+    results.append(("done_open_detector", "pass", "pass" if ok_det else "fail", ok_det,
+                    "done_open_items finds open lines only", []))
+    print("%-22s expect=%-9s got=%-9s %s" % ("done_open_detector", "pass",
+                                            "pass" if ok_det else "fail", "OK" if ok_det else "MISMATCH"))
+
     # F: self-check throttle: injected recently -> nothing (no spam)
     parts, msgs = mkparts("Done with milestone.")
     run("throttle_active", "nothing", parts, msgs,

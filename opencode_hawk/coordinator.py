@@ -38,6 +38,7 @@ import argparse
 import copy
 import json
 import os
+import html
 import re
 import secrets
 import shutil
@@ -95,10 +96,28 @@ CONFIG_DEFAULTS = {
     ),
     "approve_pending_plans": False,  # opt-in: prefix the prompts with an explicit "plans approved" grant
     "done_confirm_message": (
-        "You replied STOP: DONE. Before confirming, check your plan once more: "
-        "is every step complete and verified? If anything is still open, say "
-        "what remains and continue working on it. Otherwise reply STOP: DONE "
-        "again."
+        "You replied STOP: DONE. Before confirming, go through your plan item by "
+        "item and list each one with its evidence (test run, commit, file, "
+        "screenshot). Anything not complete and verified is OPEN, including items "
+        "you would call minor, documentation-only, deferred, a known gap or an "
+        "accepted limitation. If any item is open, do not confirm: continue "
+        "working on it now. If only a human can settle it, reply "
+        "STOP: NEEDS_DECISION <question>. Reply STOP: DONE again only if the "
+        "list has no open item."
+    ),
+    # A STOP: DONE whose own text still names open work ("7/9 screens",
+    # "remaining items", "deferred", ...) is sent back with those lines quoted,
+    # at most done_claim_max_rejects times per run; after that the normal
+    # double-tap applies and the done alert flags the open items.
+    "done_claim_check": True,
+    "done_claim_max_rejects": 2,
+    "done_open_items_message": (
+        "You replied STOP: DONE, but your own message still names open work:\n"
+        "{items}\n"
+        "A plan is done only when nothing is open. Finish these items and verify "
+        "them now; do not reclassify them as minor, documentation-only or "
+        "non-blocking. If only a human can settle one, reply "
+        "STOP: NEEDS_DECISION <question>."
     ),
     "confirm_install_cli": False,
     "continue_via_attach": True,  # prefer Desktop sidecar so the GUI streams live
@@ -989,11 +1008,24 @@ def evaluate(cfg, session, parts, messages, state):
     pending_done = state.get("pending_done_mid") or ""
     if a["plan_done"]:
         done_mid = a.get("plan_done_mid") or last_mid or ""
-        if pending_done and pending_done != done_mid:
+        open_items = done_open_items(a["last_assistant"]) if cfg.get("done_claim_check", True) else []
+        rejects = int(state.get("done_rejects") or 0)
+        if open_items and state.get("rejected_done_mid") != done_mid \
+                and rejects < int(cfg.get("done_claim_max_rejects", 2)):
+            # The claim contradicts itself: send the open lines back.
+            state["rejected_done_mid"] = done_mid
+            state["done_rejects"] = rejects + 1
+            state.pop("pending_done_mid", None)
+            return "done_rejected", ("STOP: DONE names %d open item(s); sending them back (%d/%s)"
+                                     % (len(open_items), rejects + 1, cfg.get("done_claim_max_rejects", 2))), open_items
+        if state.get("rejected_done_mid") == done_mid:
+            # Already sent back; wait for the worker's answer (cadence below).
+            pending_done = ""
+        elif pending_done and pending_done != done_mid:
             # Second, distinct STOP: DONE -> worker genuinely finished.
             state.pop("pending_done_mid", None)
             return "done", ("worker confirmed build plan complete (%s)" % a["plan_done_marker"]), [a["plan_done_marker"]]
-        if not pending_done:
+        elif not pending_done:
             # First STOP: DONE -> one-time confirmation, no continue text.
             state["pending_done_mid"] = done_mid
             return "confirm_done", ("worker says build plan complete (%s); asking once to confirm" % a["plan_done_marker"]), [a["plan_done_marker"]]
@@ -1003,6 +1035,10 @@ def evaluate(cfg, session, parts, messages, state):
     elif pending_done:
         # Worker sent something new that is NOT STOP: DONE -> back to work.
         state.pop("pending_done_mid", None)
+    if not a["plan_done"] and a["has_text"] and state.get("done_rejects"):
+        # The worker went back to work: a later done claim gets the check again.
+        state.pop("done_rejects", None)
+        state.pop("rejected_done_mid", None)
 
     # An unfinished turn that is still generating: leave it alone. A long single
     # generation may not write new parts for a while; only treat it as stopped
@@ -1050,6 +1086,40 @@ def evaluate(cfg, session, parts, messages, state):
         return "confirm_done", "confirmation of STOP: DONE still unanswered; asking once more", []
 
     return "continue", "worker stopped; sending self-check prompt", []
+
+
+# ── Done-claim check ─────────────────────────────────────────────────────────
+# Lines of a STOP: DONE message that still name open work. Deliberately simple
+# and explainable: a count below its total ("7/9 screens") or a word that
+# admits unfinished work. A line that negates it ("no open items",
+# "remaining: none") does not count.
+_OPEN_WORDS = re.compile(
+    r"\b(remaining|remains|still open|open items?|not yet|todo|to-do|deferred|"
+    r"skipped|gaps?|missing|not captured|not committed|not implemented|"
+    r"not verified|unverified|absent|incomplete|partially|pending|"
+    r"(?:accepted|known) limitations?|follow-ups?|left to do)\b", re.I)
+_NEGATED = re.compile(
+    r"\b(no|zero|0|none|nothing|without)\b[^.;\n]{0,25}\b(remaining|open|todo|gaps?|missing|"
+    r"pending|deferred|skipped|follow-ups?)\b|"
+    r"\b(remaining|open items?|todo|gaps?|missing|pending|deferred)\b\s*[:=-]?\s*"
+    r"(none|0|nothing|n/a)\b", re.I)
+_FRACTION = re.compile(r"(?<![\w/.])(\d{1,4})\s*/\s*(\d{1,4})(?![\w/.])")
+
+
+def done_open_items(text: str, limit: int = 6) -> list:
+    """The lines of a done message that still name open work (max `limit`)."""
+    found = []
+    for raw in (text or "").splitlines():
+        line = raw.strip().strip("-*\u2022 ").strip()
+        if not line or any(m in line for m in PLAN_DONE_MARKERS):
+            continue
+        short = any(int(a) < int(b) for a, b in _FRACTION.findall(line))
+        word = bool(_OPEN_WORDS.search(line)) and not _NEGATED.search(line)
+        if short or word:
+            found.append(line.replace("**", "")[:200])
+            if len(found) >= limit:
+                break
+    return found
 
 
 # ── Poll pass ────────────────────────────────────────────────────────────────
@@ -1221,7 +1291,7 @@ def apply_action(cfg, state, session, project_dir, parts, messages, action,
                  reason, rule_hits, dry_run=False, enable_continue=True, auto=True,
                  node_sid=None, node_per=None) -> int:
     target = node_per if node_per is not None else state
-    if action in ("continue", "confirm_done"):
+    if action in ("continue", "confirm_done", "done_rejected"):
         if not enable_continue:
             if node_sid:
                 log("continue suppressed for %s (auto_continue off)" % node_sid)
@@ -1236,6 +1306,12 @@ def apply_action(cfg, state, session, project_dir, parts, messages, action,
             msg = _hawk_prompt(cfg, done=True)
             if dry_run:
                 log("[dry-run] WOULD ASK CONFIRMATION OF STOP: DONE")
+                return 0
+        elif action == "done_rejected":
+            msg = cfg["done_open_items_message"].replace(
+                "{items}", "\n".join("- " + i for i in rule_hits))
+            if dry_run:
+                log("[dry-run] WOULD SEND BACK STOP: DONE (open items)")
                 return 0
         else:
             msg = _hawk_prompt(cfg, done=False)
@@ -1300,6 +1376,8 @@ def apply_action(cfg, state, session, project_dir, parts, messages, action,
                                          kind="confirm_done")
             except Exception:
                 pass
+        elif action == "done_rejected":
+            log("DONE REJECTED (open items): %s" % " | ".join(rule_hits))
         else:
             log("SELF-CHECK injected")
         injected_id = await_injected_message_id(
@@ -1368,6 +1446,10 @@ def apply_action(cfg, state, session, project_dir, parts, messages, action,
         target["done_mid"] = last_mid
         save_state(state)
         a = analyze(parts, messages)
+        open_items = done_open_items(a["last_assistant"])
+        if open_items:
+            reason += "; WARNING: the agent's message still names open items"
+            rule_hits = list(rule_hits) + ["open item: " + i for i in open_items]
         path = write_plan_done(session, project_dir, reason, rule_hits, a, cfg)
         log("DONE: build plan complete -> %s" % path)
         if cfg.get("record_escalations_to_session", True):
@@ -1377,9 +1459,11 @@ def apply_action(cfg, state, session, project_dir, parts, messages, action,
                 log("DONE: recorded in session transcript")
         try:
             from . import notify
+            warn = ("\n\n\u26a0\ufe0f <b>The agent still mentions open items:</b>\n%s\nReply to send it back to work."
+                    % "\n".join("- " + html.escape(i, quote=False) for i in open_items)) if open_items else ""
             notify.send_text(
-                cfg, "[hawk] <b>build plan complete</b>\n<i>%s</i>\n\nSession: %s"
-                % (reason, (session.get("title") or "")[:60]),
+                cfg, "[hawk] <b>build plan complete</b>\n<i>%s</i>\n\nSession: %s%s"
+                % (html.escape(reason, quote=False), (session.get("title") or "")[:60], warn),
                 eid="plandone:%s:%s" % (session["id"], last_mid),
                 meta={"session": str(session["id"])[-8:],
                       "title": (session.get("title") or "")[:60]})
