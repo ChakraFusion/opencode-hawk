@@ -299,6 +299,15 @@ def _self_test_impl():
     print("%-22s expect=%-9s got=%-9s %s" % ("done_open_detector", "pass",
                                             "pass" if ok_det else "fail", "OK" if ok_det else "MISMATCH"))
 
+    # E11: open tasks in the session's own task list block a done claim, even a clean-worded one
+    orig_todos = evaluate.__globals__["open_todos"]
+    try:
+        evaluate.__globals__["open_todos"] = lambda sid: ["[pending] Verify every GUI feature"]
+        parts, msgs = mkparts("All tasks in the plan are complete. STOP: DONE")
+        run("done_open_todos", "done_rejected", parts, msgs, {})
+    finally:
+        evaluate.__globals__["open_todos"] = orig_todos
+
     # F: self-check throttle: injected recently -> nothing (no spam)
     parts, msgs = mkparts("Done with milestone.")
     run("throttle_active", "nothing", parts, msgs,
