@@ -105,7 +105,7 @@ CONFIG_DEFAULTS = {
         "STOP: NEEDS_DECISION <question>. Reply STOP: DONE again only if the "
         "list has no open item."
     ),
-    # A STOP: DONE whose own text still names open work ("7/9 screens",
+    # A STOP: DONE while the session's task list has open tasks, or whose own text still names open work ("7/9 screens",
     # "remaining items", "deferred", ...) is sent back with those lines quoted,
     # at most done_claim_max_rejects times per run; after that the normal
     # double-tap applies and the done alert flags the open items.
@@ -466,6 +466,23 @@ def connect_db(path: Path, attempts=5):
             last = e
             time.sleep(0.5 * (i + 1))
     raise RuntimeError("cannot open opencode DB %s: %s" % (path, last))
+
+
+def open_todos(session_id) -> list:
+    """The session's open tasks from OpenCode's own task list (todowrite, the
+    list the GUI shows): pending or in_progress, as "[status] content". Empty
+    when the list or the DB is unavailable (older OpenCode, tests)."""
+    try:
+        con = connect_db(db_path(), attempts=1)
+        try:
+            rows = con.execute(
+                "SELECT content, status FROM todo WHERE session_id=? AND status IN ('pending','in_progress') "
+                "ORDER BY position", (session_id,)).fetchall()
+        finally:
+            con.close()
+        return ["[%s] %s" % (st, (c or "")[:200]) for c, st in rows]
+    except Exception:
+        return []
 
 
 def select_session(con, cfg) -> dict | None:
@@ -1008,7 +1025,10 @@ def evaluate(cfg, session, parts, messages, state):
     pending_done = state.get("pending_done_mid") or ""
     if a["plan_done"]:
         done_mid = a.get("plan_done_mid") or last_mid or ""
-        open_items = done_open_items(a["last_assistant"]) if cfg.get("done_claim_check", True) else []
+        open_items = []
+        if cfg.get("done_claim_check", True):
+            # First the task list (the agent's own plan), then its own words.
+            open_items = (open_todos(session.get("id")) + done_open_items(a["last_assistant"]))[:8]
         rejects = int(state.get("done_rejects") or 0)
         if open_items and state.get("rejected_done_mid") != done_mid \
                 and rejects < int(cfg.get("done_claim_max_rejects", 2)):
@@ -1446,7 +1466,7 @@ def apply_action(cfg, state, session, project_dir, parts, messages, action,
         target["done_mid"] = last_mid
         save_state(state)
         a = analyze(parts, messages)
-        open_items = done_open_items(a["last_assistant"])
+        open_items = (open_todos(session.get("id")) + done_open_items(a["last_assistant"]))[:8]
         if open_items:
             reason += "; WARNING: the agent's message still names open items"
             rule_hits = list(rule_hits) + ["open item: " + i for i in open_items]
