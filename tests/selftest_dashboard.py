@@ -788,6 +788,52 @@ def self_test():
 
     # llama_restart: due-reason computation (pure)
     from opencode_hawk import llama_restart
+
+    # llama_restart.restart: a server without /shutdown (404) that outlives the forced kill by a few seconds
+    # (2026-10-05: a 56 GB host cache) still gets a new process - the restart never leaves llama down.
+    import urllib.error as _ue
+    _saved = {n: getattr(llama_restart, n) for n in ("_pid", "_process_spec", "_pid_alive", "_respawn", "_wait_healthy",
+                                                       "save_state", "_lock", "_unlock")}
+    _saved_slots, _saved_urlopen, _saved_run = coordinator.llama_slots, llama_restart.urllib.request.urlopen, llama_restart.subprocess.run
+    _alive = {"left": None}
+    def _fake_alive(pid):
+        if _alive["left"] is None:
+            return True                  # before the kill
+        _alive["left"] -= 1
+        return _alive["left"] >= 0       # still exiting for a few checks after the kill
+    def _fake_run(*a, **k):
+        _alive["left"] = 3               # taskkill issued
+        return None
+    def _no_shutdown(req, timeout=5):
+        raise _ue.HTTPError(req.full_url, 404, "Not Found", {}, None)
+    _spawned = []
+    try:
+        llama_restart._pid = lambda cfg: 4242
+        llama_restart._process_spec = lambda pid: {"argv": ["llama-server.exe"], "cwd": None, "env": None}
+        llama_restart._pid_alive = _fake_alive
+        llama_restart._respawn = lambda spec: (_spawned.append(spec) or 5151)
+        llama_restart._wait_healthy = lambda cfg, timeout_s=None: True
+        llama_restart.save_state = lambda st: None
+        if hasattr(llama_restart, "_lock"):
+            llama_restart._lock = lambda key: True
+        if hasattr(llama_restart, "_unlock"):
+            llama_restart._unlock = lambda *a, **k: None
+        coordinator.llama_slots = lambda cfg: {"is_processing": False}
+        llama_restart.urllib.request.urlopen = _no_shutdown
+        llama_restart.subprocess.run = _fake_run
+        import time as _t
+        _t0 = _t.time()
+        _res = llama_restart.restart({"llama_restart_force_after_s": 60, "llama_restart_exit_wait_s": 20}, "test")
+        _took = _t.time() - _t0
+    finally:
+        for n, v in _saved.items():
+            setattr(llama_restart, n, v)
+        coordinator.llama_slots = _saved_slots
+        llama_restart.urllib.request.urlopen = _saved_urlopen
+        llama_restart.subprocess.run = _saved_run
+    check("llama_restart_survives_slow_exit",
+          bool(_res.get("ok") and _res.get("pid_new") == 5151 and len(_spawned) == 1 and _took < 15))
+    print("  restart result %s in %.1fs" % (_res, _took))
     check("llama_restart_not_due",
           not llama_restart.due_reason(100000, 90000, 60, False)["due"])
     check("llama_restart_time_due",

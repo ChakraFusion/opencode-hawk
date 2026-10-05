@@ -527,6 +527,16 @@ def test_escalation_awaiting_prune():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_fit_ntfy():
+    short = "All work is complete.\n" * 20
+    check("fit_ntfy: a message that fits is sent whole", notify.fit_ntfy(short) == short)
+    long = "\n".join("line %d: verified feature with a long description" % i for i in range(400))
+    out = notify.fit_ntfy(long)
+    check("fit_ntfy: a long message is cut to ntfy's limit at a line end",
+          len(out.encode("utf-8")) <= notify.NTFY_MAX_BYTES and out.endswith("(full text in the Hawk dashboard)")
+          and long.startswith(out.split("\n\u2026")[0]))
+
+
 def test_log_write_failure_is_contained():
     # A failed log write (e.g. the dashboard writing the same file) must be logged, not raised:
     # the local list used to shadow log(), so the handler itself crashed and a pushed alert looked unsent.
@@ -702,6 +712,7 @@ def main():
     test_escalation_awaiting_prune()
     test_remove_log_entries()
     test_log_write_failure_is_contained()
+    test_fit_ntfy()
     test_delete_ops()
     print("\n%d passed, %d failed" % (PASS, FAIL))
     return 1 if FAIL else 0

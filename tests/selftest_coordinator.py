@@ -1750,7 +1750,10 @@ def _self_test_impl():
     cfg_ok = dict(CONFIG_DEFAULTS)
     cfg_ok["project_dir"] = "/p"
     cfg_ok["notify"] = {"ntfy": {"server": "x", "topic": "t"}}
+    cfg_ok["llama_bat_path"] = "C:/llama/start.bat"
     ok_vc1 = validate_config(cfg_ok) == []
+    # without llama_bat_path a dead llama-server cannot be started again: warned (2026-10-05)
+    ok_vc1 = ok_vc1 and any("llama_bat_path" in p for p in validate_config(dict(cfg_ok, llama_bat_path="")))
     cfg_empty = dict(CONFIG_DEFAULTS)
     ok_vc2 = any("project_dir" in p for p in validate_config(cfg_empty))
     cfg_ntfy = dict(CONFIG_DEFAULTS, project_dir="/p",

@@ -295,6 +295,21 @@ def record_event(cfg, kind: str, title: str, body: str, eid: str = "",
     return sent
 
 
+NTFY_MAX_BYTES = 4096  # ntfy turns a longer message into a file attachment
+
+
+def fit_ntfy(body: str) -> str:
+    """The whole text when it fits one ntfy message; otherwise cut at a line end with a pointer to the full text."""
+    note = "\n… (full text in the Hawk dashboard)"
+    if len(body.encode("utf-8")) <= NTFY_MAX_BYTES:
+        return body
+    room = NTFY_MAX_BYTES - len(note.encode("utf-8"))
+    cut = body.encode("utf-8")[:room].decode("utf-8", errors="ignore")
+    if "\n" in cut[len(cut) // 2:]:
+        cut = cut[:cut.rfind("\n")]
+    return cut + note
+
+
 def _post_ntfy(cfg, title: str, body: str, tags: str = "",
                 actions=None, kind: str = "alert", eid: str = "",
                 meta: dict = None) -> bool:
@@ -303,7 +318,7 @@ def _post_ntfy(cfg, title: str, body: str, tags: str = "",
         return False
     # JSON publishing (POST to the server root) keeps title and tags UTF-8;
     # header publishing forced them through latin-1 ("→" arrived as "?").
-    payload = {"topic": n["topic"], "title": title[:256], "message": body,
+    payload = {"topic": n["topic"], "title": title[:256], "message": fit_ntfy(body),
                "priority": n["priority"]}
     if tags:
         payload["tags"] = [t for t in tags.split(",") if t]
@@ -593,7 +608,7 @@ def notify_escalation(cfg, session, reason, rule_hits, analysis, es_path,
     if options:
         plain += "Options: %s\n" % ", ".join(o[:40] for o in options)
     if len(last) > 60:
-        plain += "\nLast message:\n%s" % last[:600]
+        plain += "\nLast message:\n%s" % last[:2500]
 
     # ntfy: plain text notification (no action buttons). The user replies by
     # sending a message in the ntfy app on this topic; the monitor polls the
