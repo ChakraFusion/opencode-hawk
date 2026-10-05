@@ -351,7 +351,7 @@ def _event_push_sample():
                                 if legacy != eid and legacy in pushed:
                                     continue  # pushed before the eid fix
                             else:
-                                body = e.get("detail") or title
+                                body = e.get("body") or e.get("detail") or title
                                 eid = "%s:%s" % (kind, e.get("id") or e.get("mid"))
                             if kind == "milestone":
                                 meta = {"session": sid,

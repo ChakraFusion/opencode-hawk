@@ -338,7 +338,8 @@ def milestone_events(con, session_id: str, since_ms: int = 0) -> list[dict]:
         evs.append({"kind": "milestone", "id": "%s-%d" % (kind, tc), "mid": mid,
                     "time": tc, "sid": psess or "",
                     "title": stop_title(body, kind),
-                    "detail": body.strip()[:220], "ok": kind in ("DONE", "VERIFIED"), "tests": tests})
+                    "detail": body.strip()[:220], "body": body.strip(),  # detail: timeline preview; body: the push
+                    "ok": kind in ("DONE", "VERIFIED"), "tests": tests})
     return evs
 
 
