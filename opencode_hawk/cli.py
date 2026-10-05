@@ -19,6 +19,7 @@ def cmd_init(_args) -> int:
     if cfg_path.exists():
         print(f"config already exists: {cfg_path}")
     else:
+        home.mkdir(parents=True, exist_ok=True)  # a fresh install: %APPDATA%\opencode-hawk does not exist yet
         shutil.copyfile(PACKAGE_DIR / "config.example.json", cfg_path)
         print(f"created {cfg_path}")
     cfg = coordinator.load_config()
