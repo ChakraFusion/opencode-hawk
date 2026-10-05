@@ -104,11 +104,11 @@ def _write_log(entries: list) -> None:
 
 def append_notify_log(entry: dict) -> None:
     try:
-        log = load_notify_log()
-        log.append(entry)
-        if len(log) > NOTIFY_LOG_CAP:
-            log = log[-NOTIFY_LOG_CAP:]
-        _write_log(log)
+        entries = load_notify_log()  # not "log": that would shadow log() in the except below
+        entries.append(entry)
+        if len(entries) > NOTIFY_LOG_CAP:
+            entries = entries[-NOTIFY_LOG_CAP:]
+        _write_log(entries)
     except Exception as e:
         log("notify: log append failed: %s" % e)
 
@@ -120,9 +120,9 @@ def remove_log_entries(predicate) -> int:
     failure cannot be persisted as a wiped log."""
     removed = 0
     try:
-        log = load_notify_log()
+        entries = load_notify_log()
         kept = []
-        for e in log:
+        for e in entries:
             if predicate(e):
                 removed += 1
             else:

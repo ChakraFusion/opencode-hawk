@@ -527,6 +527,27 @@ def test_escalation_awaiting_prune():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_log_write_failure_is_contained():
+    # A failed log write (e.g. the dashboard writing the same file) must be logged, not raised:
+    # the local list used to shadow log(), so the handler itself crashed and a pushed alert looked unsent.
+    orig = notify._write_log
+    notify._write_log = lambda entries: (_ for _ in ()).throw(PermissionError("busy"))
+    try:
+        ok1 = ok2 = True
+        try:
+            notify.append_notify_log({"dir": "sent", "id": "x", "ts": 1})
+        except Exception:
+            ok1 = False
+        try:
+            notify.remove_log_entries(lambda e: True)
+        except Exception:
+            ok2 = False
+    finally:
+        notify._write_log = orig
+    check("log write failure: append_notify_log does not raise", ok1)
+    check("log write failure: remove_log_entries does not raise", ok2)
+
+
 def test_remove_log_entries():
     tmp = Path(tempfile.mkdtemp(prefix="ntfy-log-"))
     orig_home = hawk.home_dir
@@ -680,6 +701,7 @@ def main():
     test_poll_branches()
     test_escalation_awaiting_prune()
     test_remove_log_entries()
+    test_log_write_failure_is_contained()
     test_delete_ops()
     print("\n%d passed, %d failed" % (PASS, FAIL))
     return 1 if FAIL else 0
