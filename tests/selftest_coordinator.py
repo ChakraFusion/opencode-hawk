@@ -614,6 +614,30 @@ def _self_test_impl():
         "OK" if ok_m else "MISMATCH",
         "escalation note written to session DB as synthetic user msg + text part"))
 
+    # N00: llama-server is started outside the starter's job (Windows), falling back when breakaway is refused
+    import subprocess as _sp
+    _calls = []
+    class _FakePopen:
+        def __init__(self, argv, **kw):
+            _calls.append(kw)
+            if os.name == "nt" and kw.get("creationflags", 0) & 0x01000000 and len(_calls) == 1:
+                raise PermissionError("breakaway not allowed")
+    _orig_popen = _sp.Popen
+    _sp.Popen = _FakePopen
+    try:
+        hawk.spawn_independent(["llama-server"])
+    finally:
+        _sp.Popen = _orig_popen
+    if os.name == "nt":
+        ok_brk = (len(_calls) == 2 and _calls[0]["creationflags"] & 0x01000000
+                  and not _calls[1]["creationflags"] & 0x01000000)
+    else:
+        ok_brk = len(_calls) == 1 and _calls[0].get("start_new_session") is True
+    results.append(("spawn_independent", "pass", "pass" if ok_brk else "fail", ok_brk,
+                    "llama-server leaves the starter's job; falls back when not allowed", []))
+    print("%-22s expect=%-9s got=%-9s %s" % ("spawn_independent", "pass", "pass" if ok_brk else "fail",
+                                            "OK" if ok_brk else "MISMATCH"))
+
     # N0: `hawk init` on a fresh install creates the (missing) home folder and a private topic
     import tempfile as _tf
     from opencode_hawk import cli as _cli

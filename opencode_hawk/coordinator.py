@@ -771,6 +771,22 @@ def creation_flags() -> int:
     return 0
 
 
+CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+
+
+def spawn_independent(argv, **kw):
+    """Start a long-lived process (llama-server) that must outlive whoever started Hawk. On Windows a process
+    inherits its parent's job object: 2026-10-05 Hawk had been started from inside another app, that app's update
+    ended its job, and Hawk and llama-server died with it. So leave the job when the job allows it, else start
+    normally."""
+    if os.name != "nt":
+        return subprocess.Popen(argv, start_new_session=True, **kw)
+    try:
+        return subprocess.Popen(argv, creationflags=creation_flags() | CREATE_BREAKAWAY_FROM_JOB, **kw)
+    except OSError:
+        return subprocess.Popen(argv, creationflags=creation_flags(), **kw)
+
+
 def git(project_dir, *args):
     res = subprocess.run(
         ["git", "-C", project_dir, *args],
