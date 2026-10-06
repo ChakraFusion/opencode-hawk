@@ -1134,6 +1134,18 @@ def evaluate(cfg, session, parts, messages, state):
         state.pop("done_rejects", None)
         state.pop("rejected_done_mid", None)
 
+    # ── A question for the human ─────────────────────────────────────────────
+    # The prompts tell the worker to stop with STOP: NEEDS_DECISION <question> or STOP: BLOCKED <reason> only
+    # for what a human must settle. Ask the human (ntfy, answerable by reply) once, then send nothing until a
+    # reply (or other new input) arrives: a self-check prompt here would answer the question in the human's
+    # place (2026-10-06: "The user has approved all pending plans" settled a scope decision nobody had seen).
+    ask = _HUMAN_STOP.search(a["last_assistant"] or "")
+    # Only while the question is the last word: an answer (an ntfy reply) after it means the worker continues.
+    if ask and last_mid and messages and messages[-1].get("role") == "assistant":
+        if state.get("asked_mid") == last_mid:
+            return "nothing", "waiting for the user's answer (%s)" % ask.group(1), []
+        return "ask_user", "worker needs the user: %s" % ask.group(0)[:200], [ask.group(0)[:300]]
+
     # An unfinished turn that is still generating: leave it alone. A long single
     # generation may not write new parts for a while; only treat it as stopped
     # once it is both silent past the wedge threshold AND the model is not
@@ -1202,6 +1214,14 @@ _NEGATED = re.compile(
 _FRACTION = re.compile(r"(?<![\w/.])(\d{1,4})\s*/\s*(\d{1,4})(?![\w/.])")
 
 
+_HUMAN_STOP = re.compile(r"STOP:\s*(NEEDS_DECISION|BLOCKED)\b[^\n]*")
+# A line that reports something as finished counts as open only with a clear open signal; a word like "gaps"
+# inside a completed item's name does not ("| S1 | ✅ complete | Shipable gaps (8 phases) |", 2026-10-06).
+_COMPLETE = re.compile(r"\u2705|\u2714|\b(complete|completed|done|passed|pass|verified|committed|fixed)\b", re.I)
+_STRONG_OPEN = re.compile(r"\u274c|\u26a0|\b(not|missing|pending|partial(?:ly)?|remaining|blocked|limitations?|"
+                          r"deferred|skipped|todo|unverified|incomplete|failed|failing)\b", re.I)
+
+
 def done_open_items(text: str, limit: int = 6) -> list:
     """The lines of a done message that still name open work (max `limit`)."""
     found = []
@@ -1211,6 +1231,8 @@ def done_open_items(text: str, limit: int = 6) -> list:
             continue
         short = any(int(a) < int(b) for a, b in _FRACTION.findall(line))
         word = bool(_OPEN_WORDS.search(line)) and not _NEGATED.search(line)
+        if word and not short and _COMPLETE.search(line) and not _STRONG_OPEN.search(line):
+            word = False  # a finished item whose text merely contains an open-sounding word
         if short or word:
             found.append(line.replace("**", "")[:200])
             if len(found) >= limit:
@@ -1529,6 +1551,24 @@ def apply_action(cfg, state, session, project_dir, parts, messages, action,
         except Exception:
             pass
         return 7 if ok else 8
+
+    if action == "ask_user":
+        last_mid = messages[-1]["id"]
+        if dry_run:
+            log("[dry-run] WOULD ASK THE USER: %s" % reason)
+            return 0
+        target["asked_mid"] = last_mid
+        target["last_evaluated_mid"] = last_mid
+        save_state(state)
+        a = analyze(parts, messages)
+        path = write_escalation(session, project_dir, reason, rule_hits, a, cfg)
+        log("ASKED USER (no prompts until an answer): %s" % reason)
+        try:
+            from . import notify
+            notify.notify_escalation(cfg, session, reason, rule_hits, a, str(path), kind="escalation")
+        except Exception as e:
+            log("ask_user: notification failed: %s" % e)
+        return 9
 
     if action == "done":
         # Build plan finished — a POSITIVE stop, not an error. No further

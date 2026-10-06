@@ -43,6 +43,9 @@ Hawk keeps a run going without blindly spamming "continue".
   screens", "remaining items", "deferred", "known gaps"), Hawk sends those back
   and the agent keeps working. The confirmation asks for
   every plan item with its evidence.
+- **Decisions go to you.** When the agent stops with `STOP: NEEDS_DECISION <question>`
+  or `STOP: BLOCKED <reason>`, Hawk sends it to your phone and sends nothing into the
+  session until you answer (reply in the ntfy app); it never answers in your place.
 - **Permissions and questions.** It auto-accepts external-directory permission
   prompts and answers question-tool prompts (choosing the "(Recommended)"
   option) for sessions you mark as monitored.

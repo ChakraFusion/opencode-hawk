@@ -319,6 +319,40 @@ def _self_test_impl():
     print("%-22s expect=%-9s got=%-9s %s" % ("done_not_summary", "pass", "pass" if ok_sum else "fail",
                                             "OK" if ok_sum else "MISMATCH"))
 
+    # E12: STOP: NEEDS_DECISION / BLOCKED is put to the user, and then nothing is injected until an answer
+    parts, msgs = mkparts("Two options found.\nSTOP: NEEDS_DECISION Should I add WGC capture or accept the gap?")
+    run("needs_decision_asks", "ask_user", parts, msgs, {})
+    parts, msgs = mkparts("Two options found.\nSTOP: NEEDS_DECISION Should I add WGC capture or accept the gap?")
+    run("needs_decision_waits", "nothing", parts, msgs,
+        {"asked_mid": "msg_test_final", "last_injected_at": int(time.time() * 1000) - 120 * 60 * 1000})
+    parts, msgs = mkparts("STOP: BLOCKED the license key is missing")
+    run("blocked_asks", "ask_user", parts, msgs, {})
+    # the user answered (a reply after the question): no second question
+    parts, msgs = mkparts("Two options.\nSTOP: NEEDS_DECISION A or B?")
+    _now_a = int(time.time() * 1000)
+    msgs.append({"id": "msg_user_answer", "time": _now_a - 400000, "role": "user", "time_data": {"created": _now_a - 400000}})
+    parts.append({"time": _now_a - 400000, "message_id": "msg_user_answer", "role": "user", "type": "text",
+                  "text": "Take B", "data": {"type": "text"}})
+    _st_a = {"asked_mid": "msg_test_final"}
+    _act_a = None
+    _orig_idle_a = evaluate.__globals__["llama_idle"]
+    try:
+        evaluate.__globals__["llama_idle"] = (lambda c, s_, w=None: True)
+        _act_a = evaluate(mkcfg(mk_repo()), {"id": "ses_test", "title": "t"}, parts, msgs, _st_a)[0]
+    finally:
+        evaluate.__globals__["llama_idle"] = _orig_idle_a
+    ok_ans = _act_a != "ask_user"
+    results.append(("decision_answered", "not ask_user", str(_act_a), ok_ans, "an answer after the question", []))
+    print("%-22s expect=%-9s got=%-9s %s" % ("decision_answered", "not ask", _act_a, "OK" if ok_ans else "MISMATCH"))
+    # E13: a completed line is not open because of a word in its name; with a clear open signal it is
+    ok_fp = (hawk.done_open_items("| S1 | \u2705 complete | Shipable gaps (8 phases) |\nSTOP: DONE") == []
+             and len(hawk.done_open_items("GUI screenshots: 13/21 \u2705\n30 rows: 23 VERIFIED, 3 PARTIAL, 3 NOT VERIFIED\n"
+                                          "## Known Limitation (Documented)\nSTOP: DONE")) == 3)
+    results.append(("done_open_completed_lines", "pass", "pass" if ok_fp else "fail", ok_fp,
+                    "finished items are not open because of a word; clear open signals still count", []))
+    print("%-22s expect=%-9s got=%-9s %s" % ("done_open_completed_lines", "pass", "pass" if ok_fp else "fail",
+                                            "OK" if ok_fp else "MISMATCH"))
+
     # E11: open tasks in the session's own task list block a done claim, even a clean-worded one
     orig_todos = evaluate.__globals__["open_todos"]
     try:
