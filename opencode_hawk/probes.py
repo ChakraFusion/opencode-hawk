@@ -196,26 +196,58 @@ def llama_slots(cfg):
     return None
 
 
+SPAWN_FILE = "llama_spawn.json"
+SPAWN_GRACE_S = 180  # a server Hawk just started counts as Hawk's own until it listens (model loading)
+
+
+def record_llama_spawn(pid) -> None:
+    """Remember the llama-server Hawk just started (see llama_pid)."""
+    try:
+        core.save_json(core.home_dir() / SPAWN_FILE, {"pid": int(pid), "at": time.time()})
+    except Exception as e:
+        core.log_debug("record_llama_spawn: %s" % e)
+
+
 def llama_pid(cfg) -> int | None:
-    """Return the llama-server process id (config override, else auto-detect by
-    image name), or None if not found."""
+    """Hawk's llama-server: the config override, else the process listening on llama_api_port. Other
+    llama-server instances (other ports, started by the user) are never Hawk's: Hawk neither counts them as its
+    server nor stops them. A server Hawk started in the last SPAWN_GRACE_S that is not listening yet still
+    counts (so no second one is started while the model loads). Name lookup only when listeners cannot be
+    read, and then only if exactly one llama-server runs."""
     pid = int(cfg.get("llama_pid") or 0)
     if pid:
         return pid
+    port = int(cfg.get("llama_api_port") or 1234)
+    try:
+        import psutil
+        for conn in psutil.net_connections(kind="tcp"):
+            if conn.status == psutil.CONN_LISTEN and conn.laddr and conn.laddr.port == port and conn.pid:
+                return conn.pid
+        spawn = core.load_json(core.home_dir() / SPAWN_FILE, {}) or {}
+        sp = int(spawn.get("pid") or 0)
+        if sp and time.time() - float(spawn.get("at") or 0) < SPAWN_GRACE_S and psutil.pid_exists(sp):
+            return sp
+        return None
+    except Exception as e:  # listeners unreadable (permissions): fall back to the name, only if unambiguous
+        core.log_debug("llama_pid by port: %s" % e)
+    pids = _llama_pids_by_name()
+    return pids[0] if len(pids) == 1 else None
+
+
+def _llama_pids_by_name() -> list:
     if os.name != "nt":
-        return hawk_linux.find_pid("llama-server")
+        p = hawk_linux.find_pid("llama-server")
+        return [p] if p else []
     try:
         out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq llama-server.exe",
                               "/FO", "CSV", "/NH"],
                              capture_output=True, text=True, encoding="utf-8",
                              errors="replace", timeout=15,
                              creationflags=core.creation_flags()).stdout
-        for m in re.finditer(r'"([^"]+)","(\d+)"', out):
-            if "llama" in m.group(1).lower():
-                return int(m.group(2))
+        return [int(m.group(2)) for m in re.finditer(r'"([^"]+)","(\d+)"', out) if "llama" in m.group(1).lower()]
     except Exception as e:
         core.log_debug("llama_pid: %s" % e)
-    return None
+    return []
 
 
 def llama_server_alive(cfg) -> bool:
@@ -274,6 +306,7 @@ def _llama_respawn_locked(cfg, timeout_s=None) -> bool:
         else:
             argv = [bat] if os.access(bat, os.X_OK) else ["sh", bat]
         proc = core.spawn_independent(argv, stdout=fh, stderr=subprocess.STDOUT)
+        record_llama_spawn(proc.pid)
     except Exception as e:
         core.log("LLAMA-DOWN: respawn launch failed: %s" % e)
         return False
