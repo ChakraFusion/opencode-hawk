@@ -616,14 +616,6 @@ def test_delete_ops():
         check("delete: single message ok",
               notify.delete_message(cfg, "abc123") is True
               and calls == [("DELETE", "https://ntfy.sh/t/abc123")])
-        calls.clear()
-        r = notify.delete_all(cfg)
-        check("delete_all: enumerates then deletes each message id",
-              r == {"ok": True, "deleted": 2, "total": 2,
-                    "ok_ids": ["ida", "idb"], "failed_ids": []}
-              and calls == [("GET", "https://ntfy.sh/t/json?poll=1&since=all"),
-                            ("DELETE", "https://ntfy.sh/t/ida"),
-                            ("DELETE", "https://ntfy.sh/t/idb")])
         urllib.request.urlopen = boom_404
         check("delete: HTTP 404 -> gone is success",
               notify.delete_message(cfg, "abc123") is True)
@@ -633,25 +625,45 @@ def test_delete_ops():
     finally:
         urllib.request.urlopen = orig
 
-    # partial failure mid-clear: only confirmed deletes are counted
-    def rec_partial(req, timeout=None):
+    # clear-all returns at once; the server deletes run in the background, a failing one does not stop
+    # the others, and only live messages inside ntfy's 12 h cache are deleted
+    import time as _tm
+    now_s = int(_tm.time())
+    tmp_home = Path(tempfile.mkdtemp(prefix="ntfy-clear-"))
+    orig_home = hawk.home_dir
+    hawk.home_dir = lambda: tmp_home
+    deletes = []
+
+    def rec_bg(req, timeout=None):
         method = getattr(req, "method", None) or "GET"
         if method == "DELETE":
+            deletes.append(req.full_url)
             if req.full_url.endswith("/idb"):
                 raise urllib.error.HTTPError("u", 500, "boom", {}, None)
             return FakeResp(json.dumps({"id": "del-x"}), 200)
         return FakeStreamResp([
-            '{"event":"message","id":"ida","message":"A"}',
-            '{"event":"message","id":"idb","message":"B"}'])
+            '{"event":"message","id":"ida","message":"A","time":%d}' % (now_s - 60),
+            '{"event":"message","id":"idb","message":"B","time":%d}' % (now_s - 30),
+            '{"event":"message","id":"idc","message":"C","time":%d}' % (now_s - 20),
+            '{"event":"message","id":"old","message":"O","time":%d}' % (now_s - 13 * 3600)])
 
-    urllib.request.urlopen = rec_partial
+    urllib.request.urlopen = rec_bg
     try:
+        t0 = _tm.time()
         rp = notify.delete_all(cfg)
-        check("delete_all: partial failure -> confirmed ids only",
-              rp == {"ok": True, "deleted": 1, "total": 2, "ok_ids": ["ida"],
-                    "failed_ids": ["idb"]})
+        quick = _tm.time() - t0 < 2.0
+        th = notify._bg["thread"]
+        if th:
+            th.join(timeout=10)
+        check("delete_all: returns at once, hides all live, queues the young ones",
+              quick and rp == {"ok": True, "hidden": 4, "queued": 3}
+              and notify.hidden_ids() >= {"ida", "idb", "idc", "old"})
+        check("delete_all: background deletes continue past a failure, skip expired",
+              sorted(deletes) == ["https://ntfy.sh/t/ida", "https://ntfy.sh/t/idb", "https://ntfy.sh/t/idc"])
     finally:
         urllib.request.urlopen = orig
+        hawk.home_dir = orig_home
+        shutil.rmtree(tmp_home, ignore_errors=True)
 
     # 429 rate limit: waits and retries instead of failing the delete
     tries = []

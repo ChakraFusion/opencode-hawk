@@ -1061,7 +1061,9 @@ def ntfy_payload() -> dict:
         "topic": n["topic"],
         "server": n["server"],
         "log": notify.load_notify_log(),
-        "channel": _ntfy_channel_cache["v"],
+        # Cleared in the dashboard but possibly not yet deleted on the server: stays hidden (12 h).
+        "channel": [m for m in _ntfy_channel_cache["v"]
+                    if m.get("seq", m.get("id")) not in notify.hidden_ids()],
     }
 
 
@@ -1088,25 +1090,13 @@ def ntfy_delete(msg_id: str) -> dict:
 
 
 def ntfy_delete_all() -> dict:
-    """POST /api/ntfy/delete-all handler body: send a DELETE tombstone for
-    every message cached on the topic (enumerated from the server cache PLUS
-    local-log ids; expired/unknown ids 404 -> treated as gone), then drop
-    the matching local rows. Rows without an id (received replies) are
-    cleared too; ids whose request failed keep their local row.
-    NOTE (verified against ntfy.sh): a delete is a tombstone — it dismisses
-    the notification on connected devices but the message STAYS in ntfy's
-    pollable history until its cache TTL (12h) expires, so /api/ntfy/cache-
-    ids will keep listing ids that were "deleted"."""
+    """POST /api/ntfy/delete-all: instant, like the ntfy app's "clear all". The list (local log and channel
+    view) is cleared at once; the server deletes run in the background (notify.delete_all)."""
     from . import notify
     r = notify.delete_all(coordinator.load_config())
-    # Everything goes except rows whose live message failed to delete (they
-    # keep their delete button for a retry).
-    failed = set(r.get("failed_ids") or [])
-    notify.remove_log_entries(lambda e: e.get("id") not in failed)
-    _ntfy_channel_cache["v"] = [m for m in _ntfy_channel_cache["v"]
-                                if m.get("seq", m.get("id")) in failed]
-    return {"ok": True, "deleted": r.get("deleted", 0),
-            "total": r.get("total", 0)}
+    notify.remove_log_entries(lambda e: True)
+    _ntfy_channel_cache["v"] = []
+    return {"ok": True, "cleared": r.get("hidden", 0), "server_pending": r.get("queued", 0)}
 
 
 def ntfy_cache_ids() -> dict:

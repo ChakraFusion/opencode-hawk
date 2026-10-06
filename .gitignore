@@ -42,3 +42,6 @@ dist/
 
 # Single-instance locks (monitor, dashboard, llama-start)
 *.lock
+
+# Dashboard messages cleared but not yet expired on ntfy
+ntfy_hidden.json
