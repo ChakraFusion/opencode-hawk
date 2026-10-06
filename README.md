@@ -149,7 +149,7 @@ from the dashboard.
 | `auto_accept_external_dirs` | `true` | Auto-accept external-directory permission prompts (monitored sessions only) |
 | `auto_answer_questions` | `true` | Auto-answer question-tool prompts |
 | `continue_via_attach` | `true` | Inject through the Desktop sidecar so the GUI streams live |
-| `llama_api_port` | `1234` | llama-server API port |
+| `llama_api_port` | `1234` | llama-server API port. Hawk's server is the one listening on this port; llama-server instances you run on other ports are left alone |
 | `llama_bat_path` | `""` | Script that starts llama-server (`.bat` on Windows, shell script on Linux); the watchdog uses it to respawn a dead server. Empty = no respawn |
 | `llama_pid` | `0` | 0 = find llama-server by process name |
 | `gpu_vram_total_mb` | `0` | VRAM shown in charts; 0 = auto-detect |

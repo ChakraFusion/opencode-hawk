@@ -418,6 +418,8 @@ def _respawn(spec) -> int | None:
             env=spec.get("env") or None,
             stdout=fh, stderr=subprocess.STDOUT,
         )
+        from . import probes
+        probes.record_llama_spawn(proc.pid)
         return proc.pid
     except Exception as e:
         coordinator.log_debug("llama_restart respawn: %s" % e)

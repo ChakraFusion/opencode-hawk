@@ -614,6 +614,44 @@ def _self_test_impl():
         "OK" if ok_m else "MISMATCH",
         "escalation note written to session DB as synthetic user msg + text part"))
 
+    # N00000: Hawk's llama-server is the one on llama_api_port; the user's other instances are never Hawk's
+    import psutil as _ps, tempfile as _tf2, collections as _col
+    from opencode_hawk import probes as _pr
+    _Conn = _col.namedtuple("_Conn", "status laddr pid")
+    _Addr = _col.namedtuple("_Addr", "ip port")
+    _home2 = Path(_tf2.mkdtemp(prefix="hawk-port-"))
+    _old_home2 = os.environ.get("COORD_HOME")
+    os.environ["COORD_HOME"] = str(_home2)
+    _saved2 = (_ps.net_connections, _ps.pid_exists, _pr._llama_pids_by_name)
+    try:
+        _ps.net_connections = lambda kind="tcp": [_Conn(_ps.CONN_LISTEN, _Addr("127.0.0.1", 8080), 111),
+                                                  _Conn(_ps.CONN_LISTEN, _Addr("127.0.0.1", 1234), 222)]
+        ok_p1 = hawk.llama_pid({"llama_api_port": 1234}) == 222
+        _ps.net_connections = lambda kind="tcp": [_Conn(_ps.CONN_LISTEN, _Addr("127.0.0.1", 8080), 111)]
+        ok_p2 = hawk.llama_pid({"llama_api_port": 1234}) is None  # only the user's instance: Hawk's server is down
+        _pr.record_llama_spawn(333)
+        _ps.pid_exists = lambda pid: pid == 333
+        ok_p3 = hawk.llama_pid({"llama_api_port": 1234}) == 333  # just started, still loading: Hawk's own
+        def _no_access(kind="tcp"):
+            raise _ps.AccessDenied()
+        _ps.net_connections = _no_access
+        _pr._llama_pids_by_name = lambda: [111, 222]
+        ok_p4 = hawk.llama_pid({"llama_api_port": 1234}) is None  # cannot tell which: never guess
+        _pr._llama_pids_by_name = lambda: [222]
+        ok_p5 = hawk.llama_pid({"llama_api_port": 1234}) == 222
+    finally:
+        _ps.net_connections, _ps.pid_exists, _pr._llama_pids_by_name = _saved2
+        if _old_home2 is None:
+            os.environ.pop("COORD_HOME", None)
+        else:
+            os.environ["COORD_HOME"] = _old_home2
+        shutil.rmtree(_home2, ignore_errors=True)
+    ok_port = all([ok_p1, ok_p2, ok_p3, ok_p4, ok_p5])
+    results.append(("llama_by_port", "pass", "pass" if ok_port else "fail", ok_port,
+                    "Hawk's llama-server is the one on its port; other instances are left alone", []))
+    print("%-22s expect=%-9s got=%-9s %s %s" % ("llama_by_port", "pass", "pass" if ok_port else "fail",
+                                               "OK" if ok_port else "MISMATCH", [ok_p1, ok_p2, ok_p3, ok_p4, ok_p5]))
+
     # N0000: one instance only: a lock another process holds is refused; free again once that process ends
     import subprocess as _sp1, tempfile as _tf1
     _lockhome = Path(_tf1.mkdtemp(prefix="hawk-lock-"))
