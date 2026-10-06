@@ -261,11 +261,7 @@ def llama_respawn(cfg, timeout_s=None) -> bool:
             argv = ["cmd", "/c", bat]
         else:
             argv = [bat] if os.access(bat, os.X_OK) else ["sh", bat]
-        proc = subprocess.Popen(
-            argv,
-            stdout=fh, stderr=subprocess.STDOUT,
-            creationflags=core.creation_flags(),
-        )
+        proc = core.spawn_independent(argv, stdout=fh, stderr=subprocess.STDOUT)
     except Exception as e:
         core.log("LLAMA-DOWN: respawn launch failed: %s" % e)
         return False

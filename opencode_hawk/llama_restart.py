@@ -398,12 +398,11 @@ def _respawn(spec) -> int | None:
     except Exception:
         fh = None
     try:
-        proc = subprocess.Popen(
+        proc = coordinator.spawn_independent(
             spec["argv"],
             cwd=spec.get("cwd") or None,
             env=spec.get("env") or None,
             stdout=fh, stderr=subprocess.STDOUT,
-            creationflags=coordinator.creation_flags(),
         )
         return proc.pid
     except Exception as e:

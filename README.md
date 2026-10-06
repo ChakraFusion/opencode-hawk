@@ -192,6 +192,12 @@ nothing. Set
 
 Linux support is new. Bug reports from real Linux setups are welcome.
 
+**Windows: start Hawk on its own.** Start it from Explorer, a terminal of its own, or
+Task Scheduler. Started from inside another app (an IDE or AI-assistant terminal),
+Hawk belongs to that app's process group (job), and an update or restart of that
+app ends Hawk with it. llama-server, which Hawk starts, always leaves that group,
+so it keeps running either way.
+
 ## Agent markers
 
 Hawk's injected prompts tell the agent which markers to use, so normally no
