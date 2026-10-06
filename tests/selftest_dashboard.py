@@ -1471,7 +1471,6 @@ def self_test():
     orig_hm = coordinator.home_dir
     orig_cfg = coordinator.load_config
     orig_del = _n.delete_message
-    orig_delall = _n.delete_all
     tmp2 = Path(tempfile.mkdtemp(prefix="ntfy-del-test-"))
     coordinator.home_dir = lambda: tmp2
     coordinator.load_config = lambda: {"notify": {"ntfy":
@@ -1502,49 +1501,40 @@ def self_test():
             check("ntfy_delete_engine_fail", False)
         except RuntimeError:
             check("ntfy_delete_engine_fail", True)
-        _n.delete_message = lambda cfg, mid: True
-        _n.delete_all = lambda cfg: {"ok": True, "deleted": 2, "total": 2,
-                                     "ok_ids": ["a1", "a2"]}
-        r2 = ntfy_delete_all()
-        check("ntfy_delete_all_local_sync",
-              r2 == {"ok": True, "deleted": 2, "total": 2}
-              and _n.load_notify_log() == [])
-        # partial remote wipe: only confirmed-deleted ids prune local rows,
-        # unconfirmed ids keep their local row (and their delete button)
-        _n.append_notify_log({"dir": "sent", "id": "a3", "title": "partial",
-                              "ts": 5, "topic": "t"})
-        _n.append_notify_log({"dir": "sent", "id": "a4", "title": "unconfirmed",
-                              "ts": 6, "topic": "t"})
-        _n.delete_all = lambda cfg: {"ok": True, "deleted": 1, "total": 2,
-                                     "ok_ids": ["a3"], "failed_ids": ["a4"]}
-        r3 = ntfy_delete_all()
-        check("ntfy_delete_all_partial_sync",
-              r3 == {"ok": True, "deleted": 1, "total": 2}
-              and [e.get("id") for e in _n.load_notify_log()] == ["a4"])
-        # clear-all deletes only messages still live on the channel (not the
-        # tombstoned ones, not local-only ids) and clears the local list.
-        _n.append_notify_log({"dir": "sent", "id": "exp1", "title": "expired",
-                              "ts": 6, "topic": "t"})
-        _n.append_notify_log({"dir": "received", "id": "rr1", "kind": "reply",
-                              "ts": 7})
-        _n.delete_all = orig_delall
-        _n.delete_message = lambda cfg, mid: True
+        # clear-all is instant (like the ntfy app): the list empties at once, the cleared messages stay
+        # hidden, and the server deletes run in the background for live messages younger than 12 h only;
+        # a 429 makes the worker wait and retry instead of blocking anyone.
+        import time as _tm
+        now_s = _tm.time()
         orig_rh = _n._ntfy_raw_history
+        orig_once = _n.delete_once
         _n._ntfy_raw_history = lambda cfg: [
-            {"event": "message", "id": "c1", "message": "x", "time": 1},
-            {"event": "message", "id": "c2", "message": "y", "time": 2},
-            {"event": "message_delete", "id": "t1", "sequence_id": "c2"}]
+            {"event": "message", "id": "c1", "message": "x", "time": now_s - 60},
+            {"event": "message", "id": "c2", "message": "y", "time": now_s - 30},
+            {"event": "message_delete", "id": "t1", "sequence_id": "c2"},
+            {"event": "message", "id": "c3", "message": "old", "time": now_s - 13 * 3600}]
+        calls = []
+        def _once(cfg, mid):
+            calls.append(mid)
+            return ("limited", 0.01) if calls.count(mid) == 1 else ("ok", 0)
+        _n.delete_once = _once
         try:
-            r4 = _n.delete_all(coordinator.load_config())
-            check("ntfy_clearall_live_only",
-                  r4["total"] == 1 and r4["ok_ids"] == ["c1"]
-                  and r4["failed_ids"] == [])
+            t0 = _tm.time()
             r5 = ntfy_delete_all()
-            check("ntfy_clearall_clears_list",
-                  r5 == {"ok": True, "deleted": 1, "total": 1}
+            instant = _tm.time() - t0 < 1.0
+            check("ntfy_clearall_instant",
+                  instant and r5 == {"ok": True, "cleared": 2, "server_pending": 1}
                   and _n.load_notify_log() == [])
+            th = _n._bg["thread"]
+            if th:
+                th.join(timeout=10)
+            check("ntfy_clearall_background_live_young_only", calls == ["c1", "c1"])
+            _ntfy_channel_cache.update(t=_tm.time(), v=_n.ntfy_channel_state(coordinator.load_config()))
+            check("ntfy_clearall_hidden_until_expired",
+                  [m["seq"] for m in ntfy_payload()["channel"]] == [])
         finally:
             _n._ntfy_raw_history = orig_rh
+            _n.delete_once = orig_once
         # legacy backfill: sent entries without body recover their full body
         # from the ntfy cache by publish id; dlt- fallbacks, already-complete
         # and received rows stay untouched.
@@ -1635,7 +1625,6 @@ def self_test():
         coordinator.home_dir = orig_hm
         coordinator.load_config = orig_cfg
         _n.delete_message = orig_del
-        _n.delete_all = orig_delall
         shutil.rmtree(tmp2, ignore_errors=True)
 
     print()

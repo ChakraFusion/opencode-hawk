@@ -26,6 +26,7 @@ import os
 import time as _time
 import urllib.error
 import urllib.request
+import threading
 import uuid
 from urllib.parse import quote
 
@@ -487,17 +488,86 @@ def ntfy_channel_state(cfg, events=None) -> list:
     return out
 
 
-def delete_all(cfg) -> dict:
-    """Delete every message an ntfy client still shows for the topic.
+NTFY_CACHE_S = 12 * 3600  # ntfy.sh keeps a message this long; older ones are gone without a delete
+HIDDEN_FN = "ntfy_hidden.json"
+_bg = {"queue": [], "thread": None}
+_bg_lock = threading.Lock()
 
-    ntfy.sh has no topic-wide delete endpoint (DELETE /<topic> is a 404), so
-    each live message (ntfy_channel_state: not yet deleted) gets its own
-    DELETE /<topic>/<sequence_id>, paced at 0.1s. Local log ids are NOT
-    sent: ntfy answers 200 for unknown ids and appends a tombstone for each,
-    so they only bloat the topic. Returns {"ok", "deleted", "total",
-    "ok_ids"}; raises ValueError when no topic is configured and re-raises
-    any enumeration failure so callers can surface it.
-    """
+
+def hidden_ids() -> set:
+    """Channel messages cleared in the dashboard whose server delete may still be pending: hidden from the
+    list until ntfy drops them (12 h)."""
+    data = _hawk.load_json(_hawk.home_dir() / HIDDEN_FN, {}) or {}
+    now = _time.time()
+    return {k for k, t in data.items() if now - float(t or 0) < NTFY_CACHE_S}
+
+
+def _hide(seqs) -> None:
+    path = _hawk.home_dir() / HIDDEN_FN
+    data = _hawk.load_json(path, {}) or {}
+    now = _time.time()
+    data = {k: t for k, t in data.items() if now - float(t or 0) < NTFY_CACHE_S}
+    for s_ in seqs:
+        data[str(s_)] = now
+    _hawk.save_json(path, data)
+
+
+def delete_once(cfg, msg_id: str):
+    """One DELETE without waiting: ("ok"|"gone"|"limited"|"error", seconds to wait before retrying)."""
+    n = _ntfy_cfg(cfg)
+    url = "%s/%s/%s" % (n["server"], n["topic"], quote(str(msg_id), safe=""))
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, method="DELETE"), timeout=15) as resp:
+            return ("ok" if 200 <= (resp.status or 200) < 300 else "error"), 0
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            try:
+                wait = float(e.headers.get("Retry-After") or 5)
+            except (TypeError, ValueError):
+                wait = 5.0
+            return "limited", max(1.0, wait)
+        return ("gone" if e.code == 404 else "error"), 0
+    except Exception:
+        return "error", 0
+
+
+def _delete_worker(cfg) -> None:
+    """Server deletes in the background: as fast as ntfy allows, waiting only when it says so (429).
+    Nothing waits for this; whatever it does not finish, ntfy drops after 12 h by itself."""
+    done = failed = 0
+    while True:
+        with _bg_lock:
+            if not _bg["queue"]:
+                _bg["thread"] = None
+                break
+            mid, until = _bg["queue"][0]
+        if _time.time() > until:  # expired on the server by now: nothing to delete
+            with _bg_lock:
+                _bg["queue"].pop(0)
+            continue
+        state, wait = delete_once(cfg, mid)
+        if state == "limited":
+            _time.sleep(wait)
+            continue
+        with _bg_lock:
+            _bg["queue"].pop(0)
+        if state in ("ok", "gone"):
+            done += 1
+        else:
+            failed += 1
+        _time.sleep(0.1)
+    log("notify: background clear finished: %d deleted on the server, %d failed (ntfy drops those within 12 h)"
+        % (done, failed))
+
+
+def delete_all(cfg) -> dict:
+    """Clear every message an ntfy client still shows, without making anyone wait.
+
+    The ntfy app's own "clear all" only clears the phone, which is why it is instant. Deleting on the server
+    takes one DELETE per message (ntfy.sh has no topic-wide delete) and is rate-limited, so: every live message
+    is hidden from the dashboard at once, and the server deletes run in a background thread, only for messages
+    still inside ntfy's 12 h cache. Returns {"ok", "hidden", "queued"}; raises ValueError without a topic and
+    re-raises an enumeration failure."""
     n = _ntfy_cfg(cfg)
     if not n["topic"]:
         raise ValueError("ntfy not configured")
@@ -506,28 +576,19 @@ def delete_all(cfg) -> dict:
     except Exception as e:
         log("notify: ntfy cache enumeration failed: %s" % e)
         raise
-    # Only messages a client still shows; already-deleted ones would just
-    # pile more tombstones onto the topic.
-    seen = set()
-    ids = []
-    for m in live:
-        i = m["seq"]
-        if i not in seen:
-            seen.add(i)
-            ids.append(i)
-    deleted = 0
-    ok_ids = []
-    for i, mid in enumerate(ids):
-        if delete_message(cfg, mid):
-            deleted += 1
-            ok_ids.append(mid)
-        if i + 1 < len(ids):
-            _time.sleep(0.1)  # polite pacing between deletes (spec §3)
-    log("notify: ntfy clear-all deleted %d of %d id(s) "
-        "(live channel messages)" % (deleted, len(ids)))
-    return {"ok": True, "deleted": deleted, "total": len(ids),
-            "ok_ids": ok_ids,
-            "failed_ids": [i for i in ids if i not in set(ok_ids)]}
+    now = _time.time()
+    seqs = list(dict.fromkeys(m["seq"] for m in live))
+    _hide(seqs)
+    young = [(m["seq"], m["ts"] / 1000.0 + NTFY_CACHE_S) for m in live if now - m["ts"] / 1000.0 < NTFY_CACHE_S]
+    with _bg_lock:
+        queued = {q for q, _ in _bg["queue"]}
+        _bg["queue"].extend(item for item in dict(young).items() if item[0] not in queued)
+        start = _bg["thread"] is None and bool(_bg["queue"])
+        if start:
+            _bg["thread"] = threading.Thread(target=_delete_worker, args=(cfg,), daemon=True, name="ntfy-clear")
+            _bg["thread"].start()
+    log("notify: clear-all hid %d message(s); %d server delete(s) run in the background" % (len(seqs), len(young)))
+    return {"ok": True, "hidden": len(seqs), "queued": len(young)}
 
 
 def backfill_bodies(cfg) -> dict:

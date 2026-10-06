@@ -721,8 +721,6 @@ const NOTIFY_TAG_KINDS = {
 };
 // ntfy clear-all pacing: one DELETE per message (ntfy.sh rate-limits
 // bursts); failed ones get one slower retry pass.
-const NTFY_CLEAR_SPACING_MS = 2500;
-const NTFY_CLEAR_RETRY_SPACING_MS = 6000;
 
 let ntfyCache = { log: [] };
 
@@ -1015,50 +1013,21 @@ async function deleteNtfyMessage(id, btn) {
 }
 
 async function clearAllNtfy() {
-  let ids = (ntfyCache.channel || []).map((m) => String(m.seq || m.id));
-  const total = ids.length;
+  const total = (ntfyCache.channel || []).length;
   const topic = (ntfyCache && ntfyCache.topic) || "";
-  if (!confirm("Delete all " + total + " message(s) on ntfy channel '"
-      + topic + "'?\n\nThey disappear from the ntfy app on every device and "
-      + "from this list.")) return;
+  if (!confirm("Clear all " + total + " message(s) on ntfy channel '" + topic + "'?\n\n"
+      + "The list clears at once; the messages are deleted on the server in the background "
+      + "(they disappear from the ntfy app on every device).")) return;
   const btn = $("btn-clear-all");
   if (btn) btn.disabled = true;
-  let done = 0;
-  let failed = [];
   try {
-    // One delete per message (ntfy has no topic-wide delete); each row
-    // disappears as soon as its delete lands, so progress is visible.
-    // Failures get one slower retry pass.
-    for (let pass = 0; pass < 2 && ids.length; pass++) {
-      failed = [];
-      for (const id of ids) {
-        try {
-          await fetchJSON("/api/ntfy/delete", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ id }),
-          });
-          done++;
-          dropNtfyRow(id);
-        } catch (e) { failed.push(id); }
-        devMsg("deleting… " + done + " / " + total
-            + (failed.length ? " (" + failed.length + " failed)" : ""));
-        await sleep(pass ? NTFY_CLEAR_RETRY_SPACING_MS : NTFY_CLEAR_SPACING_MS);
-      }
-      ids = failed;
-    }
-    try {
-      await fetchJSON("/api/ntfy/prune-local", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ all: true }),
-      });
-    } catch (e) { /* not fatal */ }
+    const r = await fetchJSON("/api/ntfy/delete-all", { method: "POST" });
     ntfyCache.lastKey = "";
     await loadNtfy();
-    devMsg(failed.length
-        ? "deleted " + done + " of " + total + "; " + failed.length + " failed — try again"
-        : "deleted " + done + " message(s) — channel is empty");
+    devMsg("cleared " + (r.cleared || 0) + " message(s)"
+        + (r.server_pending ? "; " + r.server_pending + " server delete(s) running in the background" : ""));
+  } catch (e) {
+    devMsg("clear failed: " + e.message);
   } finally {
     if (btn) btn.disabled = false;
   }
