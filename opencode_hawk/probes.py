@@ -237,6 +237,18 @@ def llama_respawn(cfg, timeout_s=None) -> bool:
     already present this is a no-op that reports True - the liveness watchdog
     and the monitor supervisor both run this path and must never double-
     spawn an extra instance."""
+    # One start at a time across every Hawk process (monitor, dashboard, `hawk ensure`): two starts racing past the
+    # alive check would run two llama-servers. The alive check is repeated under the lock.
+    if not core.hold_lock("llama-start"):
+        core.log("LLAMA-DOWN: another start of llama-server is in progress; skipping")
+        return core.llama_server_alive(cfg)
+    try:
+        return _llama_respawn_locked(cfg, timeout_s)
+    finally:
+        core.release_lock("llama-start")
+
+
+def _llama_respawn_locked(cfg, timeout_s=None) -> bool:
     if core.llama_server_alive(cfg):
         core.log("LLAMA-DOWN: server already alive (pid %s); skipping respawn"
             % core.llama_pid(cfg))

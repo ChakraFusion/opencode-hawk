@@ -47,7 +47,10 @@ LOCK_FN = "llama_restart.lock"
 LOG_FN = "llama-server.out.log"
 
 DEFAULTS = {
-    "llama_restart_cadence_min": 210,
+    # Planned restarts (not the dead-server respawn, which is always on) happen only when the user enabled them
+    # (llama_kill_degraded) and the average decode speed is below llama_kill_tps. A time-based cadence is off (0)
+    # unless set; it also needs llama_kill_degraded.
+    "llama_restart_cadence_min": 0,
     "llama_restart_tps_floor": 14.0,
     "llama_restart_depth_floor": 30000,
     "llama_restart_window_s": 900,
@@ -222,11 +225,22 @@ def due_reason(now_ms: int, last_at_ms, cadence_s, degraded: bool) -> dict:
     """Union of time + degradation triggers.
     Returns {'due': bool, 'reasons': [str]}."""
     reasons = []
-    if last_at_ms and (now_ms - last_at_ms) >= cadence_s * 1000:
+    if cadence_s and last_at_ms and (now_ms - last_at_ms) >= cadence_s * 1000:
         reasons.append("time")
     if degraded:
         reasons.append("degraded")
     return {"due": bool(reasons), "reasons": reasons}
+
+
+def planned_due(cfg, now_ms: int, last_at_ms, deg: dict) -> dict:
+    """Planned restart: only when enabled (llama_kill_degraded) and the average decode speed is below
+    llama_kill_tps (or, if configured, the uptime cadence ran out). Disabled -> never due; a dead or unhealthy
+    server is handled separately by status() and always restarted."""
+    if not cfg_get(cfg, "llama_kill_degraded"):
+        return {"due": False, "reasons": []}
+    tps = deg.get("avg_tps")
+    slow = bool(deg.get("degraded")) and tps is not None and tps < cfg_get(cfg, "llama_kill_tps")
+    return due_reason(now_ms, last_at_ms, cfg_get(cfg, "llama_restart_cadence_min") * 60, slow)
 
 
 def kill_decision(cfg, deg: dict, deg_since_ms, now_ms: int) -> dict:
@@ -270,7 +284,7 @@ def status(cfg) -> dict:
     now = _now_ms()
     cad = cfg_get(cfg, "llama_restart_cadence_min") * 60
     deg = degraded_signal(cfg)
-    due = due_reason(now, last, cad, deg["degraded"])
+    due = planned_due(cfg, now, last, deg)
     # Liveness-validated state: a dead pid must read as restart_due even when
     # the state file says healthy (the 2026-09-25 16:21 gap); an alive pid
     # whose /health probe refuses is treated the same (half-dead survivor).
@@ -460,8 +474,13 @@ def restart(cfg, reason: str = "manual") -> dict:
         ok_shutdown = _graceful_shutdown(cfg, pid)
         if not ok_shutdown and _pid_alive(pid):
             return {"ok": False, "reason": "shutdown_failed"}  # still running: nothing lost
-        # From here the server is gone: whatever happens, never leave it down.
-        new_pid = _respawn(spec)
+        # From here the server is gone: whatever happens, never leave it down. One start at a time (llama-start).
+        if not coordinator.hold_lock("llama-start"):
+            return {"ok": False, "reason": "another start in progress"}
+        try:
+            new_pid = None if coordinator.llama_server_alive(cfg) else _respawn(spec)
+        finally:
+            coordinator.release_lock("llama-start")
         if not new_pid:
             from . import probes
             if probes.llama_respawn(cfg):

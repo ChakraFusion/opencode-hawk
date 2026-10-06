@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -103,6 +104,93 @@ def cmd_install_task(_args) -> int:
     return coordinator.main(["--install-task"]) or 0
 
 
+WATCHDOG_TASK = "HawkWatchdog"
+
+
+def _hawk_processes():
+    """Running Hawk monitor / dashboard processes (psutil), as {'monitor': [pids], 'dashboard': [pids], 'run': [pids]}."""
+    import psutil
+    found = {"monitor": [], "dashboard": [], "run": []}
+    for p in psutil.process_iter(["pid", "cmdline"]):
+        argv = [str(a) for a in (p.info.get("cmdline") or [])]
+        if p.info["pid"] == os.getpid() or not any("opencode_hawk" in a or a.lower().endswith(("hawk", "hawk.exe"))
+                                                    for a in argv):
+            continue
+        for role in ("monitor", "dashboard", "run"):
+            if role in argv:
+                found[role].append(p.info["pid"])
+    return found
+
+
+def _url_ok(url: str) -> bool:
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url, timeout=4) as r:
+            return 200 <= r.status < 500
+    except Exception:
+        return False
+
+
+def cmd_ensure(args) -> int:
+    """Failsafe (run every few minutes by `hawk install-watchdog`): a stopped Hawk is started again, outside any
+    app's job; a llama-server that stays down across two checks while Hawk runs is started via llama_bat_path.
+    2026-10-05: Hawk and llama-server died with the app that had started them, and the night's run stopped."""
+    import json
+    from . import coordinator
+    home = coordinator.home_dir()
+    procs = _hawk_processes()
+    dash_ok = _url_ok("http://127.0.0.1:%d/" % args.port)
+    if not procs["monitor"] or not dash_ok:
+        import psutil
+        for pid in procs["monitor"] + procs["dashboard"] + procs["run"]:
+            try:
+                psutil.Process(pid).kill()  # a half-running Hawk: start clean, never twice
+            except Exception:
+                pass
+        log = open(home / "hawk-console.log", "ab")
+        coordinator.spawn_independent([sys.executable, "-m", "opencode_hawk", "run", "--no-open", "--port", str(args.port)],
+                                      stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+        coordinator.log("WATCHDOG: Hawk was not running (monitor %s, dashboard %s); started it"
+                        % ("up" if procs["monitor"] else "down", "up" if dash_ok else "down"))
+        return 0
+    cfg = coordinator.load_config()
+    state_file = home / "watchdog.json"
+    try:
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+    except Exception:
+        state = {}
+    llama_ok = _url_ok(coordinator.llama_api_base(cfg) + "/health")
+    misses = 0 if llama_ok else int(state.get("llama_misses") or 0) + 1
+    if misses >= 2 and (cfg.get("llama_bat_path") or "").strip():
+        coordinator.log("WATCHDOG: llama-server down for %d checks while Hawk runs; starting it" % misses)
+        if coordinator.llama_respawn(cfg):
+            misses = 0
+    state_file.write_text(json.dumps({"llama_misses": misses}), encoding="utf-8")
+    return 0
+
+
+def cmd_install_watchdog(args) -> int:
+    """Register `hawk ensure` with the OS scheduler: Task Scheduler on Windows (pythonw, no window), cron elsewhere."""
+    if os.name != "nt":
+        print("# add to `crontab -e`:")
+        print("*/%d * * * * %s -m opencode_hawk ensure" % (args.every, sys.executable))
+        return 0
+    if args.remove:
+        r = subprocess.run(["schtasks", "/Delete", "/F", "/TN", WATCHDOG_TASK], capture_output=True, text=True)
+        print((r.stdout or r.stderr).strip())
+        return r.returncode
+    pyw = Path(sys.executable).with_name("pythonw.exe")
+    exe = pyw if pyw.exists() else Path(sys.executable)
+    tr = '"%s" -m opencode_hawk ensure' % exe
+    r = subprocess.run(["schtasks", "/Create", "/F", "/TN", WATCHDOG_TASK, "/SC", "MINUTE", "/MO", str(args.every),
+                        "/TR", tr, "/RL", "LIMITED"], capture_output=True, text=True)
+    print((r.stdout or r.stderr).strip())
+    if r.returncode == 0:
+        print("watchdog: every %d min `hawk ensure` starts Hawk if it is down (remove: hawk install-watchdog --remove)"
+              % args.every)
+    return r.returncode
+
+
 def cmd_run(args) -> int:
     """Monitor and dashboard as two child processes; Ctrl+C stops both."""
     py = [sys.executable, "-m", "opencode_hawk"]
@@ -160,6 +248,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_dashboard)
 
     sub.add_parser("install-task", help="print the Task Scheduler / cron entry").set_defaults(func=cmd_install_task)
+
+    p = sub.add_parser("ensure", help="failsafe: start Hawk if it is not running; start llama-server if it stays down")
+    p.add_argument("--port", type=int, default=8765)
+    p.set_defaults(func=cmd_ensure)
+
+    p = sub.add_parser("install-watchdog", help="run `hawk ensure` every 2 minutes (Task Scheduler / cron)")
+    p.add_argument("--remove", action="store_true", help="remove the watchdog task")
+    p.add_argument("--every", type=int, default=2, help="minutes between checks (default 2)")
+    p.set_defaults(func=cmd_install_watchdog)
 
     p = sub.add_parser("install-plugin", help="install the llama-restart plugin into OpenCode")
     p.add_argument("--dir", default=None, help="plugin folder (default: OpenCode's global plugins folder)")

@@ -771,6 +771,36 @@ def creation_flags() -> int:
     return 0
 
 
+_HELD_LOCKS = {}
+
+
+def hold_lock(name: str):
+    """Take the OS file lock `<home>/<name>.lock` for the rest of this process (released by the OS when the
+    process ends, also on a crash). Returns True when this process holds it, False when another one does."""
+    if name in _HELD_LOCKS:
+        return True
+    f = open(home_dir() / ("%s.lock" % name), "a+")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        return False
+    _HELD_LOCKS[name] = f
+    return True
+
+
+def release_lock(name: str) -> None:
+    f = _HELD_LOCKS.pop(name, None)
+    if f:
+        f.close()
+
+
 CREATE_BREAKAWAY_FROM_JOB = 0x01000000
 
 
@@ -1602,6 +1632,9 @@ def main(argv=None):
         return 0
 
     if args.monitor:
+        if not args.dry_run and not hold_lock("monitor"):
+            log("another Hawk monitor is already running; this one exits (one instance only)")
+            return 3
         interval = args.interval or int(cfg.get("poll_minutes", DEFAULT_POLL_MINUTES))
         log("monitor loop every %d min (dry_run=%s)" % (interval, args.dry_run))
         stop_perm = threading.Event()

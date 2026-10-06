@@ -39,3 +39,6 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+
+# Single-instance locks (monitor, dashboard, llama-start)
+*.lock
