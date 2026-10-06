@@ -79,31 +79,42 @@ Hawk keeps a run going without blindly spamming "continue".
 
 ## Quick start
 
-Install with [pipx](https://pipx.pypa.io) (Windows and Linux):
+**Windows** (PowerShell):
 
-```sh
-pipx install git+https://github.com/ChakraFusion/opencode-hawk.git
-hawk init
+```powershell
+irm https://raw.githubusercontent.com/ChakraFusion/opencode-hawk/main/install.ps1 | iex
 ```
 
-`hawk init` creates `config.json` and generates a **private ntfy topic** for this
-install (`hawk-` followed by 12 random digits). Then:
+**Linux:**
 
-1. Open the `config.json` it printed and set `project_dir` to the repository your
-   agent works in, and `llama_bat_path` to the script that starts your
-   llama-server (without it Hawk cannot start a dead server again; it warns at
-   startup).
-2. Subscribe to the printed topic in the ntfy app. Treat the topic name like a
-   password: anyone who knows it can read and send messages on it.
-3. Start Hawk with `hawk run`: the monitor and the dashboard, with the dashboard
-   opened in your browser. Ctrl+C stops both.
+```sh
+curl -fsSL https://raw.githubusercontent.com/ChakraFusion/opencode-hawk/main/install.sh | sh
+```
 
-Update with `pipx upgrade opencode-hawk`.
+The installer sets up [pipx](https://pipx.pypa.io) if needed, installs Hawk and starts
+the guided `hawk setup`, so no config file needs editing by hand:
+
+1. **Phone alerts:** a private ntfy topic is generated; subscribe to it in the ntfy
+   app (treat the name like a password) and get a test message.
+2. **llama-server:** a running server is detected with its port; if no start script
+   is set, one is written from the running server's exact command line, so Hawk can
+   start the server again if it ever stops.
+3. **Project:** the folder your agent works in.
+4. **Failsafe:** the watchdog (`hawk install-watchdog`) keeps Hawk and llama-server
+   running; optionally the OpenCode restart plugin.
+5. **Start:** Hawk starts with its dashboard on `http://127.0.0.1:8765`.
+
+Run `hawk setup` again any time to change these. Update with
+`pipx upgrade opencode-hawk`.
+
+Manual install: `pipx install git+https://github.com/ChakraFusion/opencode-hawk.git`,
+then `hawk setup` (or `hawk init` and edit `config.json` yourself).
 
 ### Commands
 
 | Command | What it does |
 |---|---|
+| `hawk setup` | Guided setup: phone alerts, llama-server and its start script, project, watchdog, start (`--yes` takes the defaults) |
 | `hawk init` | Create `config.json` and the ntfy topic (keeps an existing config) |
 | `hawk run` | Monitor + dashboard (`--interval N` minutes, `--port P`, `--no-open`) |
 | `hawk monitor` | The poll loop only (`--interval`, `--dry-run`, `--session-id`) |

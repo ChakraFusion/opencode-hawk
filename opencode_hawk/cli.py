@@ -27,9 +27,13 @@ def cmd_init(_args) -> int:
     topic = coordinator.ensure_ntfy_topic(cfg) or cfg["notify"]["ntfy"]["topic"]
     print(f"ntfy topic for this install: {topic}")
     print("  subscribe to it in the ntfy app to get phone alerts (treat it like a password)")
-    print(f"next: set project_dir and llama_bat_path (the script that starts llama-server) in {cfg_path},")
-    print("      then run `hawk run`")
+    print("next: run `hawk setup` (guided: llama-server, project, watchdog), or edit the config by hand")
     return 0
+
+
+def cmd_setup(args) -> int:
+    from . import setup_wizard
+    return setup_wizard.run(assume_yes=args.yes)
 
 
 def cmd_where(_args) -> int:
@@ -223,6 +227,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--version", action="version", version=f"hawk {__version__}")
     sub = ap.add_subparsers(dest="command", required=True)
 
+    p = sub.add_parser("setup", help="guided setup: config, phone alerts, llama-server, watchdog, start")
+    p.add_argument("--yes", action="store_true", help="take every default without asking")
+    p.set_defaults(func=cmd_setup)
     sub.add_parser("init", help="create config.json and a private ntfy topic").set_defaults(func=cmd_init)
     sub.add_parser("where", help="show the folders Hawk uses").set_defaults(func=cmd_where)
 

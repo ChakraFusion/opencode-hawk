@@ -740,6 +740,35 @@ def _self_test_impl():
     print("%-22s expect=%-9s got=%-9s %s" % ("spawn_independent", "pass", "pass" if ok_brk else "fail",
                                             "OK" if ok_brk else "MISMATCH"))
 
+    # N0s: `hawk setup` without hand edits: a running llama-server becomes a start script + port, a fresh
+    #      install gets a topic, the project folder defaults to the current one (not the example's placeholder)
+    import tempfile as _tf3
+    from opencode_hawk import setup_wizard as _sw
+    _home3 = Path(_tf3.mkdtemp(prefix="hawk-setup-")) / "opencode-hawk"
+    _old_home3 = os.environ.get("COORD_HOME")
+    os.environ["COORD_HOME"] = str(_home3)
+    _saved_find = _sw.find_llama
+    _sw.find_llama = lambda port_hint=1234: (4242, {"argv": ["C:/llama/llama-server.exe", "-m", "model file.gguf",
+                                                             "--port", "1300"], "cwd": "C:/llama"}, 1300)
+    try:
+        _sw.run(answers=["y", "", "n"], install_tasks=False, start=False)
+        _c3 = json.loads((_home3 / "config.json").read_text(encoding="utf-8"))
+        _script = Path(_c3["llama_bat_path"])
+        _body = _script.read_text(encoding="utf-8")
+        ok_setup = (_script.exists() and _c3["llama_api_port"] == 1300 and "model file.gguf" in _body
+                    and _c3["project_dir"] == os.getcwd() and _c3["notify"]["ntfy"]["topic"].startswith("hawk-"))
+    finally:
+        _sw.find_llama = _saved_find
+        if _old_home3 is None:
+            os.environ.pop("COORD_HOME", None)
+        else:
+            os.environ["COORD_HOME"] = _old_home3
+        shutil.rmtree(_home3.parent, ignore_errors=True)
+    results.append(("setup_wizard", "pass", "pass" if ok_setup else "fail", ok_setup,
+                    "hawk setup writes the start script, port, topic and project without hand edits", []))
+    print("%-22s expect=%-9s got=%-9s %s" % ("setup_wizard", "pass", "pass" if ok_setup else "fail",
+                                            "OK" if ok_setup else "MISMATCH"))
+
     # N0: `hawk init` on a fresh install creates the (missing) home folder and a private topic
     import tempfile as _tf
     from opencode_hawk import cli as _cli
