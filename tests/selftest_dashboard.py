@@ -789,6 +789,18 @@ def self_test():
     # llama_restart: due-reason computation (pure)
     from opencode_hawk import llama_restart
 
+    # planned restarts: never while disabled; when enabled only below the set average tps; no time cadence by default
+    _deg_slow = {"degraded": True, "avg_tps": 8.0}
+    _deg_ok = {"degraded": True, "avg_tps": 20.0}
+    _day = 24 * 3600 * 1000
+    check("llama_planned_off_by_default",
+          not llama_restart.planned_due({}, 10 * _day, 1, _deg_slow)["due"])
+    check("llama_planned_needs_slow_tps",
+          llama_restart.planned_due({"llama_kill_degraded": True, "llama_kill_tps": 10.0}, 10 * _day, 1, _deg_slow)["due"]
+          and not llama_restart.planned_due({"llama_kill_degraded": True, "llama_kill_tps": 10.0}, 10 * _day, 1, _deg_ok)["due"])
+    check("llama_planned_no_time_cadence_by_default",
+          not llama_restart.planned_due({"llama_kill_degraded": True}, 10 * _day, 1, {"degraded": False, "avg_tps": None})["due"])
+
     # llama_restart.restart: a server without /shutdown (404) that outlives the forced kill by a few seconds
     # (2026-10-05: a 56 GB host cache) still gets a new process - the restart never leaves llama down.
     import urllib.error as _ue
@@ -819,6 +831,8 @@ def self_test():
         if hasattr(llama_restart, "_unlock"):
             llama_restart._unlock = lambda *a, **k: None
         coordinator.llama_slots = lambda cfg: {"is_processing": False}
+        _saved_alive_srv = coordinator.llama_server_alive
+        coordinator.llama_server_alive = lambda cfg: False
         llama_restart.urllib.request.urlopen = _no_shutdown
         llama_restart.subprocess.run = _fake_run  # Windows: taskkill
         from opencode_hawk import hawk_linux as _hl
@@ -832,6 +846,7 @@ def self_test():
         for n, v in _saved.items():
             setattr(llama_restart, n, v)
         coordinator.llama_slots = _saved_slots
+        coordinator.llama_server_alive = _saved_alive_srv
         llama_restart.urllib.request.urlopen = _saved_urlopen
         llama_restart.subprocess.run = _saved_run
         try:

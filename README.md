@@ -111,6 +111,8 @@ Update with `pipx upgrade opencode-hawk`.
 | `hawk dashboard` | The web dashboard only (`--port`, `--open`) |
 | `hawk install-task` | Print the `schtasks` (Windows) or crontab (Linux) entry for `hawk poll` |
 | `hawk install-plugin` | Install the optional llama-restart plugin into OpenCode (`--remove` uninstalls) |
+| `hawk ensure` | Failsafe: start Hawk if it is not running; start llama-server if it stays down |
+| `hawk install-watchdog` | Run `hawk ensure` every 2 minutes via Task Scheduler (no window) or cron (`--remove`) |
 | `hawk where` | Show the folders Hawk uses |
 
 ### From a source checkout
@@ -172,13 +174,28 @@ hawk install-plugin
 
 It installs `local-hawk-llama-restart.ts` into OpenCode's global plugin folder
 (`~/.config/opencode/plugins/`; restart OpenCode once to load it). After a
-compaction it asks the Hawk dashboard whether a restart is due (uptime cadence or
-slow decode at deep context) and triggers it at the next idle moment; the
+compaction it asks the Hawk dashboard whether a restart is due and triggers it at
+the next idle moment. A planned restart is due only when you enabled it
+(`llama_kill_degraded`, "Kill llama when degraded" in the dashboard) and the average
+decode speed is below `llama_kill_tps`; there is no time-based restart unless you
+set `llama_restart_cadence_min`. A dead server is always started again. The
 dashboard refuses while a request is in flight and restarts the server with its
 exact command line; if that start fails, it falls back to `llama_bat_path`, so a
-restart never leaves the server down. Without a running dashboard the plugin does
-nothing. Set
-`HAWK_DASHBOARD_URL` if the dashboard is not on `http://127.0.0.1:8765`.
+restart never leaves the server down; only one start runs at a time, so there is
+never a second llama-server. Without a running dashboard the plugin does nothing.
+Set `HAWK_DASHBOARD_URL` if the dashboard is not on `http://127.0.0.1:8765`.
+
+## Failsafe: keep Hawk running
+
+```sh
+hawk install-watchdog
+```
+
+registers `hawk ensure` with Task Scheduler (Windows, every 2 minutes, no window) or
+prints the cron line (Linux). It starts Hawk again if the monitor or dashboard is not
+running, and starts llama-server via `llama_bat_path` if it stays down for two checks
+while Hawk runs. Only one Hawk monitor and one dashboard can run at a time; a second
+one exits at once.
 
 ## Platform notes
 

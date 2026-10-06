@@ -614,6 +614,70 @@ def _self_test_impl():
         "OK" if ok_m else "MISMATCH",
         "escalation note written to session DB as synthetic user msg + text part"))
 
+    # N0000: one instance only: a lock another process holds is refused; free again once that process ends
+    import subprocess as _sp1, tempfile as _tf1
+    _lockhome = Path(_tf1.mkdtemp(prefix="hawk-lock-"))
+    _old_home1 = os.environ.get("COORD_HOME")
+    os.environ["COORD_HOME"] = str(_lockhome)
+    _holder = _sp1.Popen([sys.executable, "-c",
+                          "import sys, time; sys.path.insert(0, %r); from opencode_hawk import coordinator as c; "
+                          "print(c.hold_lock('monitor'), flush=True); time.sleep(6)" % str(Path(__file__).resolve().parent.parent)],
+                         stdout=_sp1.PIPE, text=True, env=dict(os.environ))
+    try:
+        _held_by_child = _holder.stdout.readline().strip() == "True"
+        _refused = hawk.hold_lock("monitor") is False
+    finally:
+        _holder.wait(timeout=20)
+    _free_after = hawk.hold_lock("monitor") is True
+    hawk.release_lock("monitor")
+    if _old_home1 is None:
+        os.environ.pop("COORD_HOME", None)
+    else:
+        os.environ["COORD_HOME"] = _old_home1
+    shutil.rmtree(_lockhome, ignore_errors=True)
+    ok_lock = _held_by_child and _refused and _free_after
+    results.append(("single_instance_lock", "pass", "pass" if ok_lock else "fail", ok_lock,
+                    "a second Hawk (or llama start) is refused while one runs", []))
+    print("%-22s expect=%-9s got=%-9s %s" % ("single_instance_lock", "pass", "pass" if ok_lock else "fail",
+                                            "OK" if ok_lock else "MISMATCH"))
+
+    # N000: the failsafe (`hawk ensure`): Hawk down -> started; llama down -> started at the second check
+    import tempfile as _tf0
+    from opencode_hawk import cli as _cli0
+    _home0 = Path(_tf0.mkdtemp(prefix="hawk-ensure-"))
+    _old_home0 = os.environ.get("COORD_HOME")
+    os.environ["COORD_HOME"] = str(_home0)
+    (_home0 / "config.json").write_text(json.dumps({"llama_bat_path": "C:/llama/start.bat"}), encoding="utf-8")
+    _spawned0, _respawned0 = [], []
+    _saved0 = (_cli0._hawk_processes, _cli0._url_ok, hawk.spawn_independent, hawk.llama_respawn)
+    class _Args0:
+        port = 8765
+    try:
+        hawk.spawn_independent = lambda argv, **kw: _spawned0.append(argv)
+        hawk.llama_respawn = lambda cfg, timeout_s=None: (_respawned0.append(1) or True)
+        _cli0._hawk_processes = lambda: {"monitor": [], "dashboard": [], "run": []}
+        _cli0._url_ok = lambda url: False
+        _cli0.cmd_ensure(_Args0())
+        ok_e1 = len(_spawned0) == 1 and _spawned0[0][-4:] == ["run", "--no-open", "--port", "8765"]
+        _cli0._hawk_processes = lambda: {"monitor": [1], "dashboard": [2], "run": [3]}
+        _cli0._url_ok = lambda url: "8765" in url  # dashboard up, llama down
+        _cli0.cmd_ensure(_Args0())
+        ok_e2 = len(_respawned0) == 0 and len(_spawned0) == 1  # one miss: wait
+        _cli0.cmd_ensure(_Args0())
+        ok_e3 = len(_respawned0) == 1  # second miss: start llama
+    finally:
+        _cli0._hawk_processes, _cli0._url_ok, hawk.spawn_independent, hawk.llama_respawn = _saved0
+        if _old_home0 is None:
+            os.environ.pop("COORD_HOME", None)
+        else:
+            os.environ["COORD_HOME"] = _old_home0
+        shutil.rmtree(_home0, ignore_errors=True)
+    ok_ens = ok_e1 and ok_e2 and ok_e3
+    results.append(("ensure_failsafe", "pass", "pass" if ok_ens else "fail", ok_ens,
+                    "hawk ensure starts a stopped Hawk; starts llama after two missed checks", []))
+    print("%-22s expect=%-9s got=%-9s %s" % ("ensure_failsafe", "pass", "pass" if ok_ens else "fail",
+                                            "OK" if ok_ens else "MISMATCH"))
+
     # N00: llama-server is started outside the starter's job (Windows), falling back when breakaway is refused
     import subprocess as _sp
     _calls = []

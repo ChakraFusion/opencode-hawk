@@ -2065,6 +2065,9 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     if args.self_test:
         return self_test()
+    if not coordinator.hold_lock("dashboard"):
+        print("another Hawk dashboard is already running; this one exits (one instance only)")
+        return 3
     new_topic = coordinator.ensure_ntfy_topic(coordinator.load_config())
     if new_topic:
         print("ntfy: generated topic %s for this install" % new_topic)
