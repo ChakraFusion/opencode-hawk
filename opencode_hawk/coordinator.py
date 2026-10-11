@@ -1107,8 +1107,14 @@ def pending_question_block(parts) -> bool:
     return False
 
 
-def evaluate(cfg, session, parts, messages, state):
+def evaluate(cfg, session, parts, messages, state, mstate=None):
     """Return (action, reason, rule_hits).
+
+    `state` is the PER-SESSION tracking dict (keyed by the evaluated leaf). The
+    machine-wide llama liveness samples are kept separately in `mstate` (the
+    top-level state) so switching the evaluated leaf does not reset the
+    cross-poll CPU/GPU baseline. `mstate` defaults to `state` for callers that
+    already pass the top-level state (poll_once, tests).
 
     The coordinator never judges the worker's output.  It injects one
     self-check prompt when a turn has stopped (a completed message, or an
@@ -1123,6 +1129,7 @@ def evaluate(cfg, session, parts, messages, state):
     other reply clears the pending confirmation and the normal loop resumes, so
     an LLM that stops too eagerly is nudged back to work instead of closing the
     plan on a single token."""
+    mstate = state if mstate is None else mstate
     now_ms = int(time.time() * 1000)
     last_mid = messages[-1]["id"] if messages else None
 
@@ -1269,7 +1276,7 @@ def evaluate(cfg, session, parts, messages, state):
     # actively decoding.
     if busy_from_messages(messages):
         if parts and (now_ms - last_t) > stall_s:
-            if not llama_idle_sustained(cfg, state):
+            if not llama_idle_sustained(cfg, mstate):
                 return "nothing", "session busy (llama active, no new parts yet)", []
             # Llama idle, turn stalled long enough: fall through to self-check.
         else:
@@ -1298,7 +1305,7 @@ def evaluate(cfg, session, parts, messages, state):
     # (llama_idle_sustained) so a short blip from the coordinator's own
     # opencode harness (compaction/titles on the shared server) does not
     # block the injection indefinitely.
-    if not llama_idle_sustained(cfg, state):
+    if not llama_idle_sustained(cfg, mstate):
         return "nothing", "worker stopped but llama active; waiting for idle", []
 
     if pending_done:
@@ -1396,7 +1403,12 @@ def poll_multisession(cfg, state, dry_run=False) -> int:
                 continue
             node = active_leaf(con, base)
             root_dir = (base.get("directory") or "").strip() or ""
-            per = per_state(state, sid)
+            # Per-session tracking is keyed by the session we actually evaluate
+            # and steer (the active leaf), NOT the monitored root: a continue on
+            # a Task child must not set the root's re-stall clock (2026-10-10:
+            # continuing a qa child suppressed the lead's own continue for the
+            # whole re_stall window, leaving the lead stuck ~90 min).
+            per = per_state(state, node["id"])
             parts = session_parts(con, node["id"])
             messages = session_messages(con, node["id"])
             last_mid = messages[-1]["id"] if messages else None
@@ -1417,7 +1429,7 @@ def poll_multisession(cfg, state, dry_run=False) -> int:
                 primed = True
                 grew = False
                 log("primed baseline for %s: prev_head=%s" %
-                    (sid, per["prev_head"]))
+                    (node["id"], per["prev_head"]))
             acc.append({"sid": sid, "node": node, "per": per, "parts": parts,
                         "messages": messages,
                         "last_mid": last_mid, "last_t": last_t, "grew": grew,
@@ -1450,13 +1462,13 @@ def poll_multisession(cfg, state, dry_run=False) -> int:
     node_cfg = dict(cfg)
     node_cfg["project_dir"] = project_dir
     action, reason, rule_hits = evaluate(node_cfg, pick["node"], pick["parts"],
-                                         pick["messages"], pick["per"])
+                                         pick["messages"], pick["per"], state)
     return apply_action(cfg, state, pick["node"], project_dir, pick["parts"],
                         pick["messages"], action, reason, rule_hits,
                         dry_run=dry_run,
                         enable_continue=bool(ms.get("auto_continue", True)),
                         auto=bool(ms.get("auto_accept", True)),
-                        node_sid=pick["sid"], node_per=pick["per"])
+                        node_sid=pick["node"]["id"], node_per=pick["per"])
 
 
 def poll_once(cfg, state, dry_run=False) -> int:

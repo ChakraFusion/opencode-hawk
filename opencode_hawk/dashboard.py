@@ -1289,7 +1289,8 @@ def state_payload(override_sid: str | None = None) -> dict:
     cfg = coordinator.load_config()
     st = coordinator.load_state()
     selected = (override_sid or "").strip() or (cfg.get("session_id") or "").strip()
-    pst = (st.get("per") or {}).get(selected) if selected else st
+    per = st.get("per") or {}
+    pst = per.get(selected) if selected else st
     if not isinstance(pst, dict):
         pst = st
     interval = int(cfg.get("poll_minutes", 8))
@@ -1305,7 +1306,6 @@ def state_payload(override_sid: str | None = None) -> dict:
         con = coordinator.connect_db(coordinator.db_path())
         idle = worker_idle_s(con, selected)
         stitle = session_title(con, selected)
-        leval = last_evaluated_summary(con, pst.get("last_evaluated_mid") or "")
         recommended = recommended_session_id(con, cfg)
         if selected:
             row = coordinator.session_row(con, selected)
@@ -1315,15 +1315,20 @@ def state_payload(override_sid: str | None = None) -> dict:
                         "title": leaf_node.get("title") or "",
                         "idle_s": worker_idle_s(con, leaf_node["id"])}
                 # Root transcript is stale while a child has a live turn;
-                # idle/mode should reflect the live leaf.
+                # idle/mode should reflect the live leaf. State["per"] is keyed
+                # by the evaluated leaf (not the root), so show the leaf's
+                # tracking when it has one.
                 idle = leaf["idle_s"]
+                if isinstance(per.get(leaf_node["id"]), dict):
+                    pst = per[leaf_node["id"]]
+        leval = last_evaluated_summary(con, pst.get("last_evaluated_mid") or "")
     except Exception:
         recommended = ""
     finally:
         if con:
             con.close()
     proj = cfg.get("project_dir") or ""
-    head = st.get("prev_head") or ""
+    head = pst.get("prev_head") or st.get("prev_head") or ""
     head_short = head[:8] if head else ""
     head_subject = ""
     branch = git_branch(proj) if proj else ""

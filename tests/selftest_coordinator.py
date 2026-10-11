@@ -1253,10 +1253,10 @@ def _self_test_impl():
         ok_mp0 = r0 == 0 and calls == [] and "prev_head" in st0["per"].get("a", {})
         st_ms = {"per": {}}
         per_state(st_ms, "a")["prev_head"] = "h"
-        per_state(st_ms, "b")["prev_head"] = "h"
+        per_state(st_ms, "b1")["prev_head"] = "h"
         r1 = poll_multisession(_mk_mscfg(
             {"a": {"enabled": True}, "b": {"enabled": True}}), st_ms)
-        ok_mp1 = r1 == 3 and calls == ["b"]
+        ok_mp1 = r1 == 3 and calls == ["b1"]
         _mc = sqlite3.connect(str(mdb))
         _mc.execute("UPDATE part SET time_updated=?, time_created=? WHERE id='pa1'",
                     (int(time.time() * 1000), int(time.time() * 1000)))
@@ -1264,19 +1264,23 @@ def _self_test_impl():
         _mc.close()
         r2 = poll_multisession(_mk_mscfg(
             {"a": {"enabled": True}, "b": {"enabled": True}}), st_ms)
-        ok_mp2 = r2 == 0 and calls == ["b"]
+        ok_mp2 = r2 == 0 and calls == ["b1"]
         st_ms2 = {"per": {}}
         per_state(st_ms2, "a")["last_evaluated_mid"] = "ma1"
-        per_state(st_ms2, "b")["last_evaluated_mid"] = "mb11"
+        per_state(st_ms2, "b1")["last_evaluated_mid"] = "mb11"
         per_state(st_ms2, "a")["prev_head"] = "h"
-        per_state(st_ms2, "b")["prev_head"] = "h"
+        per_state(st_ms2, "b1")["prev_head"] = "h"
         r3 = poll_multisession(_mk_mscfg(
             {"a": {"enabled": True}, "b": {"enabled": True}}), st_ms2)
-        # st_ms2: neither session grew a new message, but session b has an
-        # unfinished turn (no completed in time_data) wedged long past
-        # stalled_turn_minutes -> it is a stalled candidate and gets the
-        # self-check; a's recent part keeps it out.
-        ok_mp3 = r3 == 3 and calls[-1] == "b"
+        # st_ms2: neither session grew a new message, but the active leaf of b
+        # (child b1) has an unfinished turn (no completed in time_data) wedged
+        # long past stalled_turn_minutes -> it is a stalled candidate and gets
+        # the self-check; a's recent part keeps it out. Per-session state must
+        # be keyed by the evaluated leaf (b1), never the monitored root (b): a
+        # continue on a Task child must not set the root's re-stall clock
+        # (2026-10-10: continuing a qa child left the lead stuck ~90 min).
+        ok_mp3 = (r3 == 3 and calls[-1] == "b1"
+                  and set(st_ms2["per"]) == {"a", "b1"})
         ok_mp = all([ok_mp0, ok_mp1, ok_mp2, ok_mp3])
     finally:
         g_aa["apply_action"] = o_aa
