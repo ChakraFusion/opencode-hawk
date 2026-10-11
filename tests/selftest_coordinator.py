@@ -1192,6 +1192,39 @@ def _self_test_impl():
         "OK" if ok_c else "MISMATCH",
         "same summary with changed numbers + same HEAD still gives up"))
 
+    # AO: apply_action reuses the analysis the poll already computed. With
+    # analysis=... it must not call analyze() at all; without it, exactly once
+    # (analyze used to run on every action branch -> up to 7x per poll).
+    ga_ao = apply_action.__globals__
+    o_send_ao = ga_ao["send_continue"]; o_save_ao = ga_ao["save_state"]
+    o_an_ao = ga_ao["analyze"]; o_head_ao = ga_ao["git_head"]
+    c_an = []
+    ga_ao["send_continue"] = lambda *a, **k: True
+    ga_ao["save_state"] = lambda st: None
+    ga_ao["git_head"] = lambda p: "h"
+    ga_ao["analyze"] = lambda pts, msgs: (
+        c_an.append(1), {"last_assistant": "x", "tool_blob": ""})[1]
+    ok_ao = False
+    try:
+        shared = {"last_assistant": "x", "tool_blob": ""}
+        r_ao1 = apply_action(dict(CONFIG_DEFAULTS), {}, {"id": "sx", "title": "t"},
+                             "C:/p", [], [{"id": "ma"}], "continue", "", [],
+                             analysis=shared)
+        ok_ao1 = r_ao1 == 3 and c_an == []
+        r_ao2 = apply_action(dict(CONFIG_DEFAULTS), {}, {"id": "sx", "title": "t"},
+                             "C:/p", [], [{"id": "mb"}], "continue", "", [])
+        ok_ao2 = r_ao2 == 3 and len(c_an) == 1
+        ok_ao = all([ok_ao1, ok_ao2])
+    finally:
+        ga_ao["send_continue"] = o_send_ao; ga_ao["save_state"] = o_save_ao
+        ga_ao["analyze"] = o_an_ao; ga_ao["git_head"] = o_head_ao
+    results.append(("apply_action_analyze_once", "pass", "pass", ok_ao,
+                    "reuses the poll's analyze(); no recompute when analysis passed", []))
+    print("%-26s expect=%-8s got=%-8s %s  %s" % (
+        "apply_action_analyze_once", "pass", "pass",
+        "OK" if ok_ao else "MISMATCH",
+        "reuses the poll's analyze(); no recompute when analysis passed"))
+
     # MP: multi-session poll loop picks the most-recently-active leaf; stands
     # down while anything is producing; returns 0 with no candidates.
     mdb = Path(tempfile.mkdtemp()) / "opencode.db"
@@ -1238,7 +1271,7 @@ def _self_test_impl():
         def fake_apply_action(cfg, state, session, project_dir, parts, messages,
                               action, reason, rule_hits, dry_run=False,
                               enable_continue=True, auto=True,
-                              node_sid=None, node_per=None):
+                              node_sid=None, node_per=None, analysis=None):
             calls.append(node_sid)
             return 3
         g_aa["apply_action"] = fake_apply_action
@@ -1333,7 +1366,8 @@ def _self_test_impl():
         def fake_apply_action_ab(cfg, state, session, project_dir, parts,
                                  messages, action, reason, rule_hits,
                                  dry_run=False, enable_continue=True,
-                                 auto=True, node_sid=None, node_per=None):
+                                 auto=True, node_sid=None, node_per=None,
+                                 analysis=None):
             calls_ab.append(node_sid)
             return 3
         g_ab["apply_action"] = fake_apply_action_ab

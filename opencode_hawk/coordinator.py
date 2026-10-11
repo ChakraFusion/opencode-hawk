@@ -1107,7 +1107,7 @@ def pending_question_block(parts) -> bool:
     return False
 
 
-def evaluate(cfg, session, parts, messages, state, mstate=None):
+def evaluate(cfg, session, parts, messages, state, mstate=None, analysis=None):
     """Return (action, reason, rule_hits).
 
     `state` is the PER-SESSION tracking dict (keyed by the evaluated leaf). The
@@ -1196,7 +1196,7 @@ def evaluate(cfg, session, parts, messages, state, mstate=None):
     if recent_activity:
         return "nothing", "session busy (recent activity)", []
 
-    a = analyze(parts, messages)
+    a = analysis if analysis is not None else analyze(parts, messages)
 
     # ── Post-done guard: suppress re-confirmation ────────────────────────────
     # After a DONE + append_session_note, the synthetic note creates a new
@@ -1461,14 +1461,17 @@ def poll_multisession(cfg, state, dry_run=False) -> int:
     ms = (cfg.get("monitored_sessions") or {}).get(pick["sid"]) or {}
     node_cfg = dict(cfg)
     node_cfg["project_dir"] = project_dir
+    a = analyze(pick["parts"], pick["messages"])
     action, reason, rule_hits = evaluate(node_cfg, pick["node"], pick["parts"],
-                                         pick["messages"], pick["per"], state)
+                                         pick["messages"], pick["per"], state,
+                                         analysis=a)
     return apply_action(cfg, state, pick["node"], project_dir, pick["parts"],
                         pick["messages"], action, reason, rule_hits,
                         dry_run=dry_run,
                         enable_continue=bool(ms.get("auto_continue", True)),
                         auto=bool(ms.get("auto_accept", True)),
-                        node_sid=pick["node"]["id"], node_per=pick["per"])
+                        node_sid=pick["node"]["id"], node_per=pick["per"],
+                        analysis=a)
 
 
 def poll_once(cfg, state, dry_run=False) -> int:
@@ -1509,7 +1512,9 @@ def poll_once(cfg, state, dry_run=False) -> int:
             (state["prev_head"], state["last_evaluated_mid"]))
         return 0
 
-    action, reason, rule_hits = evaluate(cfg, session, parts, messages, state)
+    a = analyze(parts, messages)
+    action, reason, rule_hits = evaluate(cfg, session, parts, messages, state,
+                                         analysis=a)
     # The leaf may be a child session absent from monitored_sessions; inherit
     # the root's policy (auto_continue/auto_accept) for it.
     ms = ((cfg.get("monitored_sessions") or {}).get(session["id"])
@@ -1518,7 +1523,7 @@ def poll_once(cfg, state, dry_run=False) -> int:
     return apply_action(cfg, state, session, cfg["project_dir"], parts, messages,
                         action, reason, rule_hits, dry_run=dry_run,
                         enable_continue=bool(ms.get("auto_continue", True)),
-                        auto=bool(ms.get("auto_accept", True)))
+                        auto=bool(ms.get("auto_accept", True)), analysis=a)
 
 
 def _hawk_prompt(cfg, done=False) -> str:
@@ -1536,8 +1541,17 @@ def _hawk_prompt(cfg, done=False) -> str:
 
 def apply_action(cfg, state, session, project_dir, parts, messages, action,
                  reason, rule_hits, dry_run=False, enable_continue=True, auto=True,
-                 node_sid=None, node_per=None) -> int:
+                 node_sid=None, node_per=None, analysis=None) -> int:
     target = node_per if node_per is not None else state
+    # analyze() is a pure function of (parts, messages); evaluate() already
+    # computed it this poll, so compute it at most once here instead of on every
+    # action branch (it used to run up to 7x per poll).
+    _an = {"v": analysis}
+
+    def _analysis():
+        if _an["v"] is None:
+            _an["v"] = analyze(parts, messages)
+        return _an["v"]
     if action in ("continue", "confirm_done", "done_rejected"):
         if not enable_continue:
             if node_sid:
@@ -1575,7 +1589,7 @@ def apply_action(cfg, state, session, project_dir, parts, messages, action,
             # the slow-loop filter the auto-resume plugin lacked). Both signals
             # must say "no progress": an identical assistant message AND an
             # unmoved git HEAD.
-            a = analyze(parts, messages)
+            a = _analysis()
             cont_fp = text_fingerprint(a["last_assistant"])
             cont_cfp = coarse_fingerprint(a["last_assistant"])
             cur_head = git_head(project_dir) or ""
@@ -1622,7 +1636,7 @@ def apply_action(cfg, state, session, project_dir, parts, messages, action,
             if now_ms - last_fail >= re_stall_ms:
                 target["last_continue_fail_at"] = now_ms
                 save_state(state)
-                a = analyze(parts, messages)
+                a = _analysis()
                 path = write_escalation(session, project_dir, reason or
                                         "self-check delivery failed (CLI unavailable); will retry",
                                         rule_hits, a, cfg)
@@ -1665,7 +1679,7 @@ def apply_action(cfg, state, session, project_dir, parts, messages, action,
             log("CONFIRMATION ASKED (first STOP: DONE)")
             try:
                 from . import notify
-                a = analyze(parts, messages)
+                a = _analysis()
                 notify.notify_escalation(cfg, session, reason, rule_hits, a, "",
                                          kind="confirm_done")
             except Exception:
@@ -1739,7 +1753,7 @@ def apply_action(cfg, state, session, project_dir, parts, messages, action,
             target["last_evaluated_mid"] = last_mid
         target["last_injected_at"] = int(time.time() * 1000)  # hold the cadence too
         save_state(state)
-        a = analyze(parts, messages)
+        a = _analysis()
         rkind = "context overflow" if action == "context_overflow" else "provider error"
         reason2 = ("session stopped on a %s that a self-check cannot clear: %s"
                    % (rkind, reason))
@@ -1767,7 +1781,7 @@ def apply_action(cfg, state, session, project_dir, parts, messages, action,
         target["asked_mid"] = last_mid
         target["last_evaluated_mid"] = last_mid
         save_state(state)
-        a = analyze(parts, messages)
+        a = _analysis()
         path = write_escalation(session, project_dir, reason, rule_hits, a, cfg)
         log("ASKED USER (no prompts until an answer): %s" % reason)
         try:
@@ -1788,7 +1802,7 @@ def apply_action(cfg, state, session, project_dir, parts, messages, action,
         target["continues"] = 0
         target["done_mid"] = last_mid
         save_state(state)
-        a = analyze(parts, messages)
+        a = _analysis()
         open_items = (open_todos(session.get("id")) + done_open_items(a["last_assistant"]))[:8]
         if open_items:
             reason += "; WARNING: the agent's message still names open items"
