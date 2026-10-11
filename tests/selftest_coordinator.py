@@ -1063,6 +1063,135 @@ def _self_test_impl():
         "OK" if ok_ev else "MISMATCH",
         "give-up guard quiets the same message; a user turn resets it"))
 
+    # message_error_kind: classify the error on the NEWEST assistant message.
+    # Context-overflow and provider/stream errors latch; abort ("unterbrochen")
+    # and user-message errors never do.
+    mk = message_error_kind
+    ok_k1 = mk([{"id": "a", "role": "assistant",
+                 "raw": {"error": {"name": "AbortError", "data": {"message": "The operation was aborted"}}}}])[0] == ""
+    ok_k2 = mk([{"id": "a", "role": "assistant",
+                 "raw": {"error": {"name": "StreamError", "data": {"message": "socket hang up"}}}}])[0] == "provider"
+    ok_k3 = mk([{"id": "a", "role": "assistant",
+                 "raw": {"error": {"data": {"message": "too large to compact"}}}}])[0] == "ooc"
+    ok_k4 = mk([{"id": "a", "role": "user",
+                 "raw": {"error": {"name": "ProviderError"}}}])[0] == ""
+    ok_k5 = mk([])[0] == ""
+    ok_k = all([ok_k1, ok_k2, ok_k3, ok_k4, ok_k5])
+    results.append(("message_error_kind", "pass", "pass", ok_k,
+                    "ooc/provider classified; abort + user errors ignored", []))
+    print("%-26s expect=%-8s got=%-8s %s  %s" % (
+        "message_error_kind", "pass", "pass",
+        "OK" if ok_k else "MISMATCH",
+        "ooc/provider classified; abort + user errors ignored"))
+
+    # evaluate error latch: a provider or context-overflow error on the newest
+    # message escalates once (provider_error / context_overflow); the SAME
+    # message then quiets to "nothing"; a NEW message releases the latch.
+    cfg_e = dict(CONFIG_DEFAULTS)
+    st_p = {}
+    act_p, _, _ = evaluate(cfg_e, None, [], [{"id": "mp", "role": "assistant",
+        "raw": {"error": {"name": "ProviderError", "data": {"message": "streaming response failed"}}}}], st_p)
+    st_o = {}
+    act_o, _, _ = evaluate(cfg_e, None, [], [{"id": "mo", "role": "assistant",
+        "raw": {"error": {"name": "AI_APICallError",
+                          "data": {"message": "prompt is too long: 300000 tokens exceeds the available context size"}}}}], st_o)
+    st_l = {"err_mid": "mp", "err_kind": "provider"}
+    act_l, _, _ = evaluate(cfg_e, None, [], [{"id": "mp", "role": "assistant",
+        "raw": {"error": {"name": "ProviderError", "data": {"message": "streaming response failed"}}}}], st_l)
+    st_r = {"err_mid": "mp", "err_kind": "provider", "last_evaluated_mid": "m2"}
+    act_r, _, _ = evaluate(cfg_e, None, [],
+                           [{"id": "m2", "role": "assistant", "time_data": {"created": 0, "completed": 0}}], st_r)
+    ok_e = (act_p == "provider_error" and act_o == "context_overflow"
+            and act_l == "nothing" and act_r == "nothing"
+            and "err_mid" not in st_r and "err_kind" not in st_r)
+    results.append(("evaluate_error_latch", "pass", "pass", ok_e,
+                    "provider/ooc escalate once then quiet; new msg releases", []))
+    print("%-26s expect=%-8s got=%-8s %s  %s" % (
+        "evaluate_error_latch", "pass", "pass",
+        "OK" if ok_e else "MISMATCH",
+        "provider/ooc escalate once then quiet; new msg releases"))
+
+    # apply_action error stop: latch err_mid/err_kind, hold the cadence, write
+    # the escalation + note, and do NOT send a self-check prompt (return 2).
+    ga_e = apply_action.__globals__
+    o_send_e = ga_e["send_continue"]; o_save_e = ga_e["save_state"]
+    o_an_e = ga_e["analyze"]; o_esc_e = ga_e["write_escalation"]
+    o_note_e = ga_e["append_session_note"]; o_dbp_e = ga_e["db_path"]
+    e_sends = []
+    ga_e["send_continue"] = lambda *a, **k: (e_sends.append(a) or True)
+    ga_e["save_state"] = lambda st: None
+    ga_e["append_session_note"] = lambda *a, **k: True
+    ga_e["write_escalation"] = lambda *a, **k: "C:/tmp/esc.md"
+    ga_e["analyze"] = lambda pts, msgs: {"last_assistant": "x", "tool_blob": ""}
+    ga_e["db_path"] = lambda: "C:/tmp/x.db"
+    ok_es = False
+    try:
+        st_es = {}
+        msgs_es = [{"id": "me", "role": "assistant",
+                    "raw": {"error": {"name": "ProviderError", "data": {"message": "streaming response failed"}}}}]
+        r_es = apply_action(dict(CONFIG_DEFAULTS), st_es, {"id": "sx", "title": "t"},
+                            "C:/p", [], msgs_es, "provider_error", "boom", [])
+        ok_es = (r_es == 2 and st_es.get("err_mid") == "me"
+                 and st_es.get("err_kind") == "provider"
+                 and st_es.get("last_evaluated_mid") == "me"
+                 and len(e_sends) == 0)
+    finally:
+        ga_e["send_continue"] = o_send_e; ga_e["save_state"] = o_save_e
+        ga_e["analyze"] = o_an_e; ga_e["write_escalation"] = o_esc_e
+        ga_e["append_session_note"] = o_note_e; ga_e["db_path"] = o_dbp_e
+    results.append(("apply_action_error_stop", "pass", "pass", ok_es,
+                    "provider/ooc stop: latch + escalate, no nudge (return 2)", []))
+    print("%-26s expect=%-8s got=%-8s %s  %s" % (
+        "apply_action_error_stop", "pass", "pass",
+        "OK" if ok_es else "MISMATCH",
+        "provider/ooc stop: latch + escalate, no nudge (return 2)"))
+
+    # apply_action coarse repeat: the SAME summary with only changed numbers, and
+    # an unchanged HEAD, still counts as no progress (give up); no_progress_coarse
+    # off disables that (a changed number then counts as progress -> continue).
+    ga_c = apply_action.__globals__
+    o_send_c = ga_c["send_continue"]; o_save_c = ga_c["save_state"]
+    o_an_c = ga_c["analyze"]; o_esc_c = ga_c["write_escalation"]
+    o_head_c = ga_c["git_head"]; o_note_c = ga_c["append_session_note"]
+    c_sends = []
+    ga_c["send_continue"] = lambda *a, **k: (c_sends.append(a) or True)
+    ga_c["save_state"] = lambda st: None
+    ga_c["git_head"] = lambda p: "h"
+    ga_c["append_session_note"] = lambda *a, **k: True
+    ga_c["write_escalation"] = lambda *a, **k: "C:/tmp/esc.md"
+    ok_c = False
+    try:
+        st_c = {"continues": 0}
+        ga_c["analyze"] = lambda pts, msgs: {"last_assistant": "finished step 1 of 3 at 12:00", "tool_blob": ""}
+        r_c1 = apply_action(dict(CONFIG_DEFAULTS), st_c, {"id": "sx", "title": "t"},
+                            "C:/p", [], [{"id": "mc1"}], "continue", "", [])
+        ok_c1 = r_c1 == 3 and bool(st_c.get("progress_cfp"))
+        st_c["continues"] = int(CONFIG_DEFAULTS.get("no_progress_limit", 3))
+        ga_c["analyze"] = lambda pts, msgs: {"last_assistant": "finished step 1 of 3 at 12:05", "tool_blob": ""}
+        n_before = len(c_sends)
+        r_c2 = apply_action(dict(CONFIG_DEFAULTS), st_c, {"id": "sx", "title": "t"},
+                            "C:/p", [], [{"id": "mc2"}], "continue", "", [])
+        ok_c2 = r_c2 == 2 and st_c.get("gave_up_mid") == "mc2" and len(c_sends) == n_before
+        # Same inputs, coarse matching OFF -> the changed number is progress.
+        cfg_nc = dict(CONFIG_DEFAULTS); cfg_nc["no_progress_coarse"] = False
+        st_c2 = {"continues": int(CONFIG_DEFAULTS.get("no_progress_limit", 3)),
+                 "progress_fp": st_c.get("progress_fp"), "progress_cfp": st_c.get("progress_cfp"),
+                 "prev_head": "h"}
+        r_c3 = apply_action(cfg_nc, st_c2, {"id": "sx", "title": "t"},
+                            "C:/p", [], [{"id": "mc3"}], "continue", "", [])
+        ok_c3 = r_c3 == 3
+        ok_c = all([ok_c1, ok_c2, ok_c3])
+    finally:
+        ga_c["send_continue"] = o_send_c; ga_c["save_state"] = o_save_c
+        ga_c["analyze"] = o_an_c; ga_c["write_escalation"] = o_esc_c
+        ga_c["git_head"] = o_head_c; ga_c["append_session_note"] = o_note_c
+    results.append(("apply_action_coarse_repeat", "pass", "pass", ok_c,
+                    "same summary with changed numbers + same HEAD still gives up", []))
+    print("%-26s expect=%-8s got=%-8s %s  %s" % (
+        "apply_action_coarse_repeat", "pass", "pass",
+        "OK" if ok_c else "MISMATCH",
+        "same summary with changed numbers + same HEAD still gives up"))
+
     # MP: multi-session poll loop picks the most-recently-active leaf; stands
     # down while anything is producing; returns 0 with no candidates.
     mdb = Path(tempfile.mkdtemp()) / "opencode.db"
@@ -1123,9 +1252,6 @@ def _self_test_impl():
         r0 = poll_multisession(_mk_mscfg({"a": {"enabled": True}}), st0)
         ok_mp0 = r0 == 0 and calls == [] and "prev_head" in st0["per"].get("a", {})
         st_ms = {"per": {}}
-        per_state(st_ms, "a")["last_seen_at"] = 600
-        per_state(st_ms, "b")["last_seen_at"] = 600
-        per_state(st_ms, "b1")["last_seen_at"] = 9600
         per_state(st_ms, "a")["prev_head"] = "h"
         per_state(st_ms, "b")["prev_head"] = "h"
         r1 = poll_multisession(_mk_mscfg(

@@ -16,7 +16,11 @@ or a model that is still generating is never interrupted. The build ends only
 on a confirmed STOP: DONE (two distinct messages). A session that keeps
 stopping with the SAME last message and an unchanged project HEAD is given up
 on after no_progress_limit self-checks - escalated to the human instead of
-nudged forever - so Hawk itself can never sit in a slow loop.
+nudged forever - so Hawk itself can never sit in a slow loop. Likewise a turn
+that died on a context-overflow or provider/stream error is escalated once and
+left alone (a self-check cannot clear it, and opencode owns its own retries);
+a new message releases the latch. Only the newest message is inspected, and
+abort errors ("unterbrochen") are deliberately ignored.
 
 Rule evaluation is idempotent per session message: every message id gets
 at most one verdict (continue / escalate), tracked in state.json.
@@ -146,6 +150,9 @@ CONFIG_DEFAULTS = {
                                 # last message and an unchanged project HEAD, stop
                                 # nudging and escalate to the human instead (a slow
                                 # runaway filter; 0 disables the give-up)
+    "no_progress_coarse": True, # also treat near-identical messages (same text but
+                                # changed counts/ids) as no-progress when HEAD is
+                                # unchanged; False requires a verbatim repeat
     "record_escalations_to_session": True,  # also write each escalation into the session transcript DB
     "monitored_sessions": {},             # per-session steering: {sid: {enabled, auto_accept, auto_continue, project_dir}}
     # Outbound alerts. Channel:
@@ -373,8 +380,9 @@ def save_state(state: dict) -> None:
 
 PER_STATE_DEFAULTS = {
     "last_evaluated_mid": "", "prev_head": "", "continues": 0,
-    "last_continue_at": 0, "last_seen_at": 0, "pending_done_mid": "",
-    "done_mid": "", "progress_fp": "", "gave_up_mid": "",
+    "pending_done_mid": "", "done_mid": "",
+    "progress_fp": "", "progress_cfp": "", "gave_up_mid": "",
+    "err_mid": "", "err_kind": "",
 }
 
 
@@ -848,6 +856,64 @@ def text_fingerprint(text: str) -> str:
     return hashlib.sha1(norm.encode("utf-8", "replace")).hexdigest()[:16] if norm else ""
 
 
+def coarse_fingerprint(text: str) -> str:
+    """Like text_fingerprint but masks volatile tokens (hex ids, numbers, and
+    bare numbers) so a worker re-sending the SAME summary with only changed
+    counts/timestamps is still recognised as stuck. Only ever used together
+    with an unchanged git HEAD, so masking digits cannot manufacture progress
+    out of real commits."""
+    norm = re.sub(r"\s+", " ", text or "").strip()
+    if not norm:
+        return ""
+    norm = re.sub(r"\b[0-9a-f]{7,}\b", "#", norm, flags=re.I)  # hashes / ids
+    norm = re.sub(r"\d+", "#", norm)                            # counts / times
+    return hashlib.sha1(norm.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+# Context-overflow (OOC) errors a "continue" prompt can never clear: the request
+# simply exceeds the model's window. Nudging forever on one is the auto-resume
+# plugin's 193-continuation incident (ses_f239075d3ffeRK43uZ). A provider/stream
+# error is transport, not verdict - opencode's own retry owns it, so Hawk must
+# stand down instead of injecting a prompt that also cannot run.
+_OOC_ERROR_RE = re.compile(
+    r"exceeds the available context size|context size \(\d+\)|too large to compact|"
+    r"too many tokens|prompt is too long", re.I)
+_PROVIDER_ERROR_NAMES = {
+    "ProviderError", "APIError", "APICallError", "AI_APICallError", "AI_RetryError",
+    "StreamError", "ConnectionError", "TimeoutError",
+}
+_PROVIDER_ERROR_RE = re.compile(
+    r"streaming response failed|stream.{0,20}fail|connection.{0,20}reset|"
+    r"connection.{0,20}closed|aborted due to timeout|fetch failed|"
+    r"socket hang up|ECONNRESET|ECONNREFUSED|terminated", re.I)
+
+
+def message_error_kind(messages) -> tuple[str, str]:
+    """Classify an error recorded on the NEWEST message. Returns (kind, text)
+    with kind in {"", "ooc", "provider"}. Only the last message counts and only
+    when it is the assistant's (a later user reply means the human is already
+    handling it). Deliberately ignores abort errors ("unterbrochen"): those are
+    user/UI stops, not something Hawk should latch."""
+    if not messages:
+        return "", ""
+    last = messages[-1]
+    if last.get("role") != "assistant":
+        return "", ""
+    err = (last.get("raw") or {}).get("error")
+    if not err:
+        return "", ""
+    try:
+        blob = json.dumps(err, ensure_ascii=False)
+    except Exception:
+        blob = str(err)
+    if _OOC_ERROR_RE.search(blob):
+        return "ooc", blob[:300]
+    name = str(err.get("name") or "") if isinstance(err, dict) else ""
+    if name in _PROVIDER_ERROR_NAMES or _PROVIDER_ERROR_RE.search(blob):
+        return "provider", ((name + ": ") if name else "") + blob[:260]
+    return "", ""
+
+
 # ── Continue injection ───────────────────────────────────────────────────────
 def find_opencode() -> str | None:
     if os.environ.get("OPENCODE_BIN"):
@@ -1076,6 +1142,23 @@ def evaluate(cfg, session, parts, messages, state):
             state.pop("gave_up_mid", None)
             state["continues"] = 0
             state["progress_fp"] = ""
+
+    # ── Provider / context-overflow latch ────────────────────────────────────
+    # A recorded context-overflow or provider/stream error cannot be cleared by
+    # a "continue" (the auto-resume 193-continuation incident). Escalate once,
+    # then stand down on the erroring message; a NEW message releases the latch
+    # so a recovered session (or a human reply) resumes normally. Abort errors
+    # are ignored by message_error_kind.
+    err_mid = state.get("err_mid") or ""
+    if err_mid and err_mid == last_mid:
+        return "nothing", ("waiting after a %s error (already escalated)"
+                           % (state.get("err_kind") or "provider")), []
+    if err_mid and err_mid != last_mid:
+        state.pop("err_mid", None)
+        state.pop("err_kind", None)
+    err_kind, err_text = message_error_kind(messages)
+    if err_kind:
+        return ("context_overflow" if err_kind == "ooc" else "provider_error"), err_text, [err_text[:300]]
 
     last_t = last_part_time(parts)
     recent_activity = bool(last_t) and (now_ms - last_t) < cfg["idle_minutes"] * 60_000
@@ -1455,6 +1538,7 @@ def apply_action(cfg, state, session, project_dir, parts, messages, action,
             return 0
         last_mid = messages[-1]["id"]
         cont_fp = ""
+        cont_cfp = ""
         if action == "confirm_done":
             msg = _hawk_prompt(cfg, done=True)
             if dry_run:
@@ -1481,10 +1565,15 @@ def apply_action(cfg, state, session, project_dir, parts, messages, action,
             # unmoved git HEAD.
             a = analyze(parts, messages)
             cont_fp = text_fingerprint(a["last_assistant"])
+            cont_cfp = coarse_fingerprint(a["last_assistant"])
             cur_head = git_head(project_dir) or ""
             prev_fp = str(target.get("progress_fp") or "")
+            prev_cfp = str(target.get("progress_cfp") or "")
             limit = int(cfg.get("no_progress_limit", 3) or 0)
-            if (limit > 0 and prev_fp and cont_fp and cont_fp == prev_fp
+            coarse_on = bool(cfg.get("no_progress_coarse", True))
+            same_text = bool(prev_fp and cont_fp and cont_fp == prev_fp) or \
+                (coarse_on and bool(prev_cfp and cont_cfp and cont_cfp == prev_cfp))
+            if (limit > 0 and same_text
                     and cur_head == str(target.get("prev_head") or "")
                     and int(target.get("continues") or 0) >= limit):
                 reason_g = ("no progress after %d self-checks: the worker repeated "
@@ -1545,6 +1634,7 @@ def apply_action(cfg, state, session, project_dir, parts, messages, action,
         if action == "continue":
             target["continues"] = target.get("continues", 0) + 1
             target["progress_fp"] = cont_fp
+            target["progress_cfp"] = cont_cfp
         target.pop("last_continue_fail_at", None)
         save_state(state)
         if action == "continue":
@@ -1625,6 +1715,37 @@ def apply_action(cfg, state, session, project_dir, parts, messages, action,
         except Exception:
             pass
         return 7 if ok else 8
+
+    if action in ("context_overflow", "provider_error"):
+        last_mid = messages[-1]["id"] if messages else ""
+        if dry_run:
+            log("[dry-run] WOULD ESCALATE %s: %s" % (action, reason))
+            return 0
+        target["err_mid"] = last_mid
+        target["err_kind"] = "ooc" if action == "context_overflow" else "provider"
+        if last_mid:
+            target["last_evaluated_mid"] = last_mid
+        target["last_injected_at"] = int(time.time() * 1000)  # hold the cadence too
+        save_state(state)
+        a = analyze(parts, messages)
+        rkind = "context overflow" if action == "context_overflow" else "provider error"
+        reason2 = ("session stopped on a %s that a self-check cannot clear: %s"
+                   % (rkind, reason))
+        path = write_escalation(session, project_dir, reason2, rule_hits, a, cfg)
+        log("STOP (%s): %s -> %s" % (rkind, reason2, path))
+        if cfg.get("record_escalations_to_session", True):
+            try:
+                note = ("[hawk] Stopped auto-continuing this session: " + reason2
+                        + "\nReport: %s\nReply to resume, or start a new task." % path)
+                append_session_note(db_path(), session["id"], note, _model_field(session))
+            except Exception as _ne:
+                log("error stop: session note failed: %s" % _ne)
+        try:
+            from . import notify
+            notify.notify_escalation(cfg, session, reason2, rule_hits, a, str(path))
+        except Exception as _ne:
+            log("error stop: notification failed: %s" % _ne)
+        return 2
 
     if action == "ask_user":
         last_mid = messages[-1]["id"]
