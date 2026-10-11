@@ -13,7 +13,10 @@ generation happens inside the Desktop server and the GUI streams it live.
 Design: the worker's own judgment decides when it has more to do. A stopped
 session gets at most one self-check prompt per re_stall_minutes; a busy turn
 or a model that is still generating is never interrupted. The build ends only
-on a confirmed STOP: DONE (two distinct messages).
+on a confirmed STOP: DONE (two distinct messages). A session that keeps
+stopping with the SAME last message and an unchanged project HEAD is given up
+on after no_progress_limit self-checks - escalated to the human instead of
+nudged forever - so Hawk itself can never sit in a slow loop.
 
 Rule evaluation is idempotent per session message: every message id gets
 at most one verdict (continue / escalate), tracked in state.json.
@@ -36,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 import html
@@ -138,6 +142,10 @@ CONFIG_DEFAULTS = {
     "gpu_vram_total_mb": 0,       # GPU VRAM total (MB) that pins the VRAM chart Y-axis + "used/total" %. 0 = auto-detect
     "re_stall_minutes": 45,     # min gap between self-check prompts for a session
                                 # that keeps stopping without replying STOP: DONE
+    "no_progress_limit": 3,     # after this many self-check prompts with the same
+                                # last message and an unchanged project HEAD, stop
+                                # nudging and escalate to the human instead (a slow
+                                # runaway filter; 0 disables the give-up)
     "record_escalations_to_session": True,  # also write each escalation into the session transcript DB
     "monitored_sessions": {},             # per-session steering: {sid: {enabled, auto_accept, auto_continue, project_dir}}
     # Outbound alerts. Channel:
@@ -366,7 +374,7 @@ def save_state(state: dict) -> None:
 PER_STATE_DEFAULTS = {
     "last_evaluated_mid": "", "prev_head": "", "continues": 0,
     "last_continue_at": 0, "last_seen_at": 0, "pending_done_mid": "",
-    "done_mid": "",
+    "done_mid": "", "progress_fp": "", "gave_up_mid": "",
 }
 
 
@@ -832,6 +840,14 @@ def git_head(project_dir) -> str:
     return out if rc == 0 else ""
 
 
+def text_fingerprint(text: str) -> str:
+    """Whitespace-normalised fingerprint of an assistant message, used to spot a
+    worker that repeats itself verbatim (a soft loop). Empty text yields "" so a
+    caller never mistakes "no message" for progress."""
+    norm = re.sub(r"\s+", " ", text or "").strip()
+    return hashlib.sha1(norm.encode("utf-8", "replace")).hexdigest()[:16] if norm else ""
+
+
 # ── Continue injection ───────────────────────────────────────────────────────
 def find_opencode() -> str | None:
     if os.environ.get("OPENCODE_BIN"):
@@ -1043,6 +1059,24 @@ def evaluate(cfg, session, parts, messages, state):
     plan on a single token."""
     now_ms = int(time.time() * 1000)
     last_mid = messages[-1]["id"] if messages else None
+
+    # ── No-progress give-up ──────────────────────────────────────────────────
+    # apply_action stops nudging after no_progress_limit self-checks that left
+    # the last message and the project HEAD unchanged, and records gave_up_mid.
+    # Stay quiet on that same message; a NEW message (a human reply, or the
+    # worker finally moving) releases the guard. A human turn also clears the
+    # no-progress budget so a real reply gets a fresh set of self-checks.
+    # Checked before any probe so a wedged session costs nothing per poll.
+    gave_up_mid = state.get("gave_up_mid") or ""
+    if gave_up_mid:
+        if gave_up_mid == last_mid:
+            return "nothing", ("gave up after %d self-checks with no progress; "
+                               "waiting for new input" % int(state.get("continues") or 0)), []
+        if messages and messages[-1].get("role") == "user":
+            state.pop("gave_up_mid", None)
+            state["continues"] = 0
+            state["progress_fp"] = ""
+
     last_t = last_part_time(parts)
     recent_activity = bool(last_t) and (now_ms - last_t) < cfg["idle_minutes"] * 60_000
     stall_s = int(cfg.get("stalled_turn_minutes", 15)) * 60_000
@@ -1420,6 +1454,7 @@ def apply_action(cfg, state, session, project_dir, parts, messages, action,
                 save_state(state)
             return 0
         last_mid = messages[-1]["id"]
+        cont_fp = ""
         if action == "confirm_done":
             msg = _hawk_prompt(cfg, done=True)
             if dry_run:
@@ -1436,6 +1471,44 @@ def apply_action(cfg, state, session, project_dir, parts, messages, action,
             if dry_run:
                 log("[dry-run] WOULD INJECT self-check prompt")
                 return 0
+            # ── No-progress give-up ──────────────────────────────────────
+            # re_stall_minutes bounds how OFTEN we nudge, but nothing stopped
+            # Hawk nudging a wedged session forever: same last message, project
+            # HEAD unchanged. After no_progress_limit such self-checks, stop and
+            # hand the session to the human instead of nudging again (this is
+            # the slow-loop filter the auto-resume plugin lacked). Both signals
+            # must say "no progress": an identical assistant message AND an
+            # unmoved git HEAD.
+            a = analyze(parts, messages)
+            cont_fp = text_fingerprint(a["last_assistant"])
+            cur_head = git_head(project_dir) or ""
+            prev_fp = str(target.get("progress_fp") or "")
+            limit = int(cfg.get("no_progress_limit", 3) or 0)
+            if (limit > 0 and prev_fp and cont_fp and cont_fp == prev_fp
+                    and cur_head == str(target.get("prev_head") or "")
+                    and int(target.get("continues") or 0) >= limit):
+                reason_g = ("no progress after %d self-checks: the worker repeated "
+                            "its last message and the project HEAD did not move"
+                            % int(target.get("continues") or 0))
+                target["gave_up_mid"] = last_mid
+                target["last_evaluated_mid"] = last_mid
+                target["last_injected_at"] = int(time.time() * 1000)
+                save_state(state)
+                path = write_escalation(session, project_dir, reason_g, rule_hits, a, cfg)
+                log("GIVE UP (no progress): %s -> %s" % (reason_g, path))
+                if cfg.get("record_escalations_to_session", True):
+                    try:
+                        note = ("[hawk] Stopped auto-continuing this session: " + reason_g
+                                + "\nReport: %s\nReply to resume, or start a new task." % path)
+                        append_session_note(db_path(), session["id"], note, _model_field(session))
+                    except Exception as _ne:
+                        log("give_up: session note failed: %s" % _ne)
+                try:
+                    from . import notify
+                    notify.notify_escalation(cfg, session, reason_g, rule_hits, a, str(path))
+                except Exception as _ne:
+                    log("give_up: notification failed: %s" % _ne)
+                return 2
         if not send_continue(cfg, session["id"], project_dir, msg, auto=auto):
             # Delivery failed. Do NOT advance last_evaluated_mid/continues: the
             # session is still pending, so the next poll re-evaluates and retries
@@ -1471,6 +1544,7 @@ def apply_action(cfg, state, session, project_dir, parts, messages, action,
         target["prev_head"] = git_head(project_dir) or target.get("prev_head")
         if action == "continue":
             target["continues"] = target.get("continues", 0) + 1
+            target["progress_fp"] = cont_fp
         target.pop("last_continue_fail_at", None)
         save_state(state)
         if action == "continue":

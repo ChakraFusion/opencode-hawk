@@ -999,6 +999,70 @@ def _self_test_impl():
         "OK" if ok_f else "MISMATCH",
         "continue delivery failure: no mid advance, throttled escalation, retry"))
 
+    # apply_action no-progress give-up: after no_progress_limit self-checks with
+    # the SAME last message and an unchanged project HEAD, stop nudging and
+    # escalate (return 2) instead of continuing forever. A fresh session still
+    # continues (return 3), and a changed message continues too.
+    ga = apply_action.__globals__
+    o_send_g = ga["send_continue"]; o_save_g = ga["save_state"]
+    o_an_g = ga["analyze"]; o_esc_g = ga["write_escalation"]
+    o_head_g = ga["git_head"]; o_note_g = ga["append_session_note"]
+    g_sends = []
+    ga["send_continue"] = lambda *a, **k: (g_sends.append(a) or True)
+    ga["save_state"] = lambda st: None
+    ga["git_head"] = lambda p: "h"
+    ga["append_session_note"] = lambda *a, **k: True
+    ga["write_escalation"] = lambda *a, **k: "C:/tmp/esc.md"
+    ga["analyze"] = lambda pts, msgs: {"last_assistant": "still working on the same step", "tool_blob": ""}
+    ok_g = False
+    try:
+        st_g = {"continues": 0}
+        r1 = apply_action(dict(CONFIG_DEFAULTS), st_g, {"id": "sx", "title": "t"},
+                          "C:/p", [], [{"id": "m1"}], "continue", "", [])
+        ok_g1 = (r1 == 3 and st_g.get("continues") == 1
+                 and bool(st_g.get("progress_fp")) and st_g.get("prev_head") == "h")
+        # Reached the limit with identical text and HEAD unchanged -> give up.
+        st_g["continues"] = int(CONFIG_DEFAULTS.get("no_progress_limit", 3))
+        n_before = len(g_sends)
+        r2 = apply_action(dict(CONFIG_DEFAULTS), st_g, {"id": "sx", "title": "t"},
+                          "C:/p", [], [{"id": "m2"}], "continue", "", [])
+        ok_g2 = (r2 == 2 and st_g.get("gave_up_mid") == "m2"
+                 and len(g_sends) == n_before)  # no nudge sent
+        # A different last message counts as progress -> continue again.
+        ga["analyze"] = lambda pts, msgs: {"last_assistant": "moved on to a new step", "tool_blob": ""}
+        r3 = apply_action(dict(CONFIG_DEFAULTS), st_g, {"id": "sx", "title": "t"},
+                          "C:/p", [], [{"id": "m3"}], "continue", "", [])
+        ok_g3 = r3 == 3
+        ok_g = all([ok_g1, ok_g2, ok_g3])
+    finally:
+        ga["send_continue"] = o_send_g; ga["save_state"] = o_save_g
+        ga["analyze"] = o_an_g; ga["write_escalation"] = o_esc_g
+        ga["git_head"] = o_head_g; ga["append_session_note"] = o_note_g
+    results.append(("apply_action_no_progress", "pass", "pass", ok_g,
+                    "give up after N no-progress self-checks (return 2, no nudge)", []))
+    print("%-26s expect=%-8s got=%-8s %s  %s" % (
+        "apply_action_no_progress", "pass", "pass",
+        "OK" if ok_g else "MISMATCH",
+        "give up after N no-progress self-checks (return 2, no nudge)"))
+
+    # evaluate: a recorded give-up on the CURRENT message returns "nothing"
+    # (never re-nudges the same wedged message); a new message releases it.
+    st_ev = {"gave_up_mid": "m9", "continues": 3}
+    act_ev, _, _ = evaluate(dict(CONFIG_DEFAULTS), None, [], [{"id": "m9", "role": "assistant"}], st_ev)
+    ok_ev1 = act_ev == "nothing"
+    st_ev2 = {"gave_up_mid": "m9", "continues": 3, "progress_fp": "abc", "last_evaluated_mid": "m10"}
+    msgs_ev2 = [{"id": "m10", "role": "user", "time_data": {"created": 0, "completed": 0}}]
+    evaluate(dict(CONFIG_DEFAULTS), None, [], msgs_ev2, st_ev2)
+    ok_ev2 = ("gave_up_mid" not in st_ev2 and st_ev2.get("continues") == 0
+              and st_ev2.get("progress_fp") == "")
+    ok_ev = ok_ev1 and ok_ev2
+    results.append(("evaluate_gave_up", "pass", "pass", ok_ev,
+                    "give-up guard quiets the same message; a user turn resets it", []))
+    print("%-26s expect=%-8s got=%-8s %s  %s" % (
+        "evaluate_gave_up", "pass", "pass",
+        "OK" if ok_ev else "MISMATCH",
+        "give-up guard quiets the same message; a user turn resets it"))
+
     # MP: multi-session poll loop picks the most-recently-active leaf; stands
     # down while anything is producing; returns 0 with no candidates.
     mdb = Path(tempfile.mkdtemp()) / "opencode.db"
