@@ -37,8 +37,13 @@ NOTIFY_LOG_CAP = 500
 # eid dedupe memory; must cover every event inside the dashboard's subagent
 # push lookback window (2 h), across all sessions.
 PUSHED_EIDS_CAP = 1000
-# Back-off between DELETE retries when ntfy.sh answers 429 (seconds).
-DELETE_429_WAITS_S = [6, 12, 20]
+# Back-off between retries when ntfy.sh answers 429 (seconds). ntfy rate-limits
+# per client (a burst, then ~1 request / 5 s) and hawk's own channel polling
+# shares that budget, so both the send and delete paths wait for the bucket to
+# refill instead of failing the publish.
+NTFY_429_WAITS_S = [6, 12, 20]
+# Back-compat alias for the delete path's historical name.
+DELETE_429_WAITS_S = NTFY_429_WAITS_S
 
 # Event taxonomy: everything the phone can be notified about. The web UI
 # renders one checkbox per kind (gate the phone push only; the web timeline
@@ -311,6 +316,25 @@ def fit_ntfy(body: str) -> str:
     return cut + note
 
 
+def _urlopen_retry_429(req, label: str, waits=None, timeout: int = 15):
+    """urlopen with backoff-and-retry on HTTP 429.
+
+    ntfy rate-limits per client (a burst, then ~1 request / 5 s) and hawk's own
+    channel polling shares that budget, so a 429 must wait for the bucket to
+    refill rather than fail the request. The 429 is re-raised once the waits
+    are exhausted so each caller keeps its own error handling (send -> False,
+    delete -> 404 is "gone", else False)."""
+    for wait in list(NTFY_429_WAITS_S if waits is None else waits) + [None]:
+        try:
+            return urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and wait is not None:
+                log("notify: ntfy %s -> 429, retry in %ds" % (label, wait))
+                _time.sleep(wait)
+                continue
+            raise
+
+
 def _post_ntfy(cfg, title: str, body: str, tags: str = "",
                 actions=None, kind: str = "alert", eid: str = "",
                 meta: dict = None) -> bool:
@@ -330,7 +354,7 @@ def _post_ntfy(cfg, title: str, body: str, tags: str = "",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         headers={"Content-Type": "application/json"}, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with _urlopen_retry_429(req, "send %s" % title[:40]) as resp:
             ok = 200 <= (resp.status or 200) < 300
             msg_id = ""
             if ok:
@@ -373,27 +397,18 @@ def delete_message(cfg, msg_id: str) -> bool:
     if not n["topic"]:
         raise ValueError("ntfy not configured")
     url = "%s/%s/%s" % (n["server"], n["topic"], quote(str(msg_id), safe=""))
-    # ntfy.sh rate-limits per client (a burst, then ~1 request / 5 s) and
-    # hawk's own channel polling shares that budget, so a 429 waits for the
-    # bucket to refill and retries instead of failing the delete.
-    for attempt, wait in enumerate(DELETE_429_WAITS_S + [None]):
-        req = urllib.request.Request(url, method="DELETE")
-        try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                ok = 200 <= (resp.status or 200) < 300
-            log("notify: ntfy delete %s -> %s" % (msg_id, "ok" if ok else "failed"))
-            return ok
-        except urllib.error.HTTPError as e:
-            if e.code == 429 and wait is not None:
-                log("notify: ntfy delete %s -> 429, retry in %ds" % (msg_id, wait))
-                _time.sleep(wait)
-                continue
-            log("notify: ntfy delete %s -> %s" % (msg_id, "gone" if e.code == 404 else e))
-            return e.code == 404
-        except Exception as e:
-            log("notify: ntfy delete %s failed: %s" % (msg_id, e))
-            return False
-    return False
+    req = urllib.request.Request(url, method="DELETE")
+    try:
+        with _urlopen_retry_429(req, "delete %s" % msg_id) as resp:
+            ok = 200 <= (resp.status or 200) < 300
+        log("notify: ntfy delete %s -> %s" % (msg_id, "ok" if ok else "failed"))
+        return ok
+    except urllib.error.HTTPError as e:
+        log("notify: ntfy delete %s -> %s" % (msg_id, "gone" if e.code == 404 else e))
+        return e.code == 404
+    except Exception as e:
+        log("notify: ntfy delete %s -> %s" % (msg_id, e))
+        return False
 
 
 def _ntfy_raw_history(cfg) -> list:

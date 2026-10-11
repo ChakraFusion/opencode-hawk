@@ -713,6 +713,50 @@ def test_delete_ops():
         urllib.request.urlopen = orig2
 
 
+def test_send_429_retry():
+    """The publish path backs off and retries on 429 like the delete path
+    (ntfy's per-client bucket is shared with hawk's own channel polling)."""
+    tmp = Path(tempfile.mkdtemp(prefix="ntfy-send429-"))
+    orig_home = hawk.home_dir
+    hawk.home_dir = lambda: tmp
+    orig_loadcfg = notify.load_config
+    cfg = {"notify": {"ntfy": {"topic": "t", "server": "https://ntfy.sh",
+                               "priority": 3}}, "monitored_sessions": {}}
+    notify.load_config = lambda: cfg
+    orig_waits = notify.NTFY_429_WAITS_S
+    notify.NTFY_429_WAITS_S = [0, 0]
+    orig_urlopen = urllib.request.urlopen
+    tries = []
+
+    def flaky(req, timeout=None):
+        tries.append(1)
+        if len(tries) == 1:
+            raise urllib.error.HTTPError("u", 429, "slow", {}, None)
+        return FakeResp(json.dumps({"id": "t1"}), 200)
+
+    exhausted = []
+
+    def always_429(req, timeout=None):
+        exhausted.append(1)
+        raise urllib.error.HTTPError("u", 429, "slow", {}, None)
+
+    try:
+        urllib.request.urlopen = flaky
+        ok1 = notify._post_ntfy(cfg, "title", "body")
+        check("send: 429 then 200 retries and succeeds",
+              ok1 is True and len(tries) == 2)
+        urllib.request.urlopen = always_429
+        ok2 = notify._post_ntfy(cfg, "title", "body")
+        check("send: exhausted 429 -> False after full backoff",
+              ok2 is False and len(exhausted) == len(notify.NTFY_429_WAITS_S) + 1)
+    finally:
+        urllib.request.urlopen = orig_urlopen
+        notify.NTFY_429_WAITS_S = orig_waits
+        notify.load_config = orig_loadcfg
+        hawk.home_dir = orig_home
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     test_kinds_enabled()
     test_record_event_gates()
@@ -726,6 +770,7 @@ def main():
     test_log_write_failure_is_contained()
     test_fit_ntfy()
     test_delete_ops()
+    test_send_429_retry()
     print("\n%d passed, %d failed" % (PASS, FAIL))
     return 1 if FAIL else 0
 
