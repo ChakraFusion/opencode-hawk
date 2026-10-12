@@ -60,6 +60,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from datetime import datetime, timezone
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import hawk_linux
@@ -1532,19 +1533,36 @@ def self_test():
     return selftest_coordinator.self_test()
 
 
+@dataclass
+class Ctx:
+    """Explicit context for one sweep: the config (reloaded every tick), the
+    state, and the resolved opencode DB path, plus the dry-run flag. The poll
+    engine takes this instead of re-deriving db_path()/home_dir() internally, so
+    the runtime surface is one named object and tests can inject a DB."""
+    cfg: dict
+    state: dict
+    db: Path
+    dry_run: bool = False
+
+    @classmethod
+    def for_run(cls, cfg, state, dry_run=False) -> "Ctx":
+        return cls(cfg, state, db_path(), dry_run)
+
+
 def poll_multisession(cfg, state, dry_run=False) -> int:
     """Poll all enabled roots; steer at most one (most-recently-active leaf) or
     none when any session is currently producing."""
-    return _poll_roots(cfg, state, monitored_roots(cfg), dry_run=dry_run)
+    return _poll_roots(Ctx.for_run(cfg, state, dry_run), monitored_roots(cfg))
 
 
-def _poll_roots(cfg, state, roots, dry_run=False) -> int:
+def _poll_roots(ctx: "Ctx", roots) -> int:
     """Shared poll engine: `roots` are monitored root session ids. Steers at
     most one session per poll (the most-recently-active leaf) or none when any
     session is currently producing. poll_once calls it with a single root."""
     if not roots:
         return 0
-    db = db_path()
+    cfg, state, dry_run = ctx.cfg, ctx.state, ctx.dry_run
+    db = ctx.db
     if not db.exists():
         log("error: opencode DB not found at %s" % db)
         return 1
@@ -1635,11 +1653,17 @@ def _poll_roots(cfg, state, roots, dry_run=False) -> int:
                         analysis=a)
 
 
-def poll_once(cfg, state, dry_run=False) -> int:
-    """Single-session poll (no monitored_sessions configured): resolve the
-    watched session, then run the same engine poll_multisession uses so the two
-    paths cannot drift."""
-    db = db_path()
+def poll_ctx(ctx: "Ctx", cli_override=False):
+    """Dispatch one poll from an explicit context: monitored roots first, else
+    the legacy single session. Returns None when neither is enabled, so the
+    caller can log 'no enabled sessions'."""
+    cfg = ctx.cfg
+    roots = monitored_roots(cfg)
+    if roots:
+        return _poll_roots(ctx, roots)
+    if not _single_session_enabled(cfg, cli_override=cli_override):
+        return None
+    db = ctx.db
     if not db.exists():
         log("error: opencode DB not found at %s (set OPENCODE_DB)" % db)
         return 1
@@ -1647,7 +1671,14 @@ def poll_once(cfg, state, dry_run=False) -> int:
         base = select_session(con, cfg)
     if base is None:
         return 0
-    return _poll_roots(cfg, state, [base["id"]], dry_run=dry_run)
+    return _poll_roots(ctx, [base["id"]])
+
+
+def poll_once(cfg, state, dry_run=False) -> int:
+    """Single-session poll (no monitored_sessions configured): resolve the
+    watched session, then run the same engine poll_multisession uses so the two
+    paths cannot drift."""
+    return poll_ctx(Ctx.for_run(cfg, state, dry_run), cli_override=True) or 0
 
 
 def _hawk_prompt(cfg, done=False) -> str:
@@ -1967,11 +1998,9 @@ def _poll_worker(cfg, state, args):
             desktop_permission_sweep(cfg)  # catch asks missed by SSE
         if not args.dry_run and cfg.get("auto_answer_questions", True):
             desktop_question_sweep(cfg)  # question-tool asks block the worker turn; catch misses
-        if monitored_roots(cfg):
-            poll_multisession(cfg, state, dry_run=args.dry_run)
-        elif _single_session_enabled(cfg, cli_override=bool(args.session_id)):
-            poll_once(cfg, state, dry_run=args.dry_run)
-        else:
+        r = poll_ctx(Ctx.for_run(cfg, state, args.dry_run),
+                     cli_override=bool(args.session_id))
+        if r is None:
             log("no enabled sessions; nothing to auto-continue")
     except Exception as e:
         log("poll error: %s" % e)
@@ -2099,12 +2128,12 @@ def main(argv=None):
             desktop_permission_sweep(cfg)
         except Exception as e:
             log_debug("permission sweep error: %s" % e)
-    if monitored_roots(cfg):
-        return poll_multisession(cfg, state, dry_run=args.dry_run)
-    if _single_session_enabled(cfg, cli_override=bool(args.session_id)):
-        return poll_once(cfg, state, dry_run=args.dry_run)
-    log("no enabled sessions; nothing to auto-continue")
-    return 0
+    r = poll_ctx(Ctx.for_run(cfg, state, args.dry_run),
+                 cli_override=bool(args.session_id))
+    if r is None:
+        log("no enabled sessions; nothing to auto-continue")
+        return 0
+    return r
 
 
 # Moved to probes.py; bound here so `coordinator.<name>` keeps working (one shared namespace).

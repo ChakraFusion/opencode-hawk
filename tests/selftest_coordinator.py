@@ -1544,6 +1544,24 @@ def _self_test_impl():
         print("%-24s expect=%-8s got=%-8s %s  %s" % (
             _name, "pass", "pass", "OK" if _ok else "MISMATCH", _name))
 
+    # CTX: the explicit run context carries cfg/state/db; poll_ctx returns None
+    # when neither monitored_sessions nor a single session is enabled.
+    orig_mp_ctx = db_path.__globals__["db_path"]
+    try:
+        db_path.__globals__["db_path"] = lambda: Path("C:/nonexistent/db.sqlite")
+        cfg_ctx = dict(CONFIG_DEFAULTS)
+        cfg_ctx["monitored_sessions"] = {}
+        cfg_ctx["session_id"] = ""
+        ctx_c = Ctx.for_run(cfg_ctx, {})
+        ok_ctx = (ctx_c.cfg is cfg_ctx
+                  and str(ctx_c.db).replace("\\", "/").endswith("C:/nonexistent/db.sqlite")
+                  and poll_ctx(ctx_c) is None)
+    finally:
+        db_path.__globals__["db_path"] = orig_mp_ctx
+    results.append(("ctx_poll_ctx", "pass", "pass", ok_ctx, "ctx_poll_ctx", []))
+    print("%-24s expect=%-8s got=%-8s %s  %s" % (
+        "ctx_poll_ctx", "pass", "pass", "OK" if ok_ctx else "MISMATCH", "ctx_poll_ctx"))
+
     # AB: a non-git project dir converges after ONE priming pass (prev
     #     used to sit at "" and re-prime every pass, skipping evaluate).
     #     On the next pass, the completed turn at rest past idle reaches
