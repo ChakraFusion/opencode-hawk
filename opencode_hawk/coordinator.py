@@ -1380,13 +1380,19 @@ def self_test():
 def poll_multisession(cfg, state, dry_run=False) -> int:
     """Poll all enabled roots; steer at most one (most-recently-active leaf) or
     none when any session is currently producing."""
+    return _poll_roots(cfg, state, monitored_roots(cfg), dry_run=dry_run)
+
+
+def _poll_roots(cfg, state, roots, dry_run=False) -> int:
+    """Shared poll engine: `roots` are monitored root session ids. Steers at
+    most one session per poll (the most-recently-active leaf) or none when any
+    session is currently producing. poll_once calls it with a single root."""
+    if not roots:
+        return 0
     db = db_path()
     if not db.exists():
         log("error: opencode DB not found at %s" % db)
         return 1
-    roots = monitored_roots(cfg)
-    if not roots:
-        return 0
     now_ms = int(time.time() * 1000)
     idle_ms = int(cfg.get("idle_minutes", DEFAULT_IDLE_MINUTES)) * 60_000
     acc = []
@@ -1475,55 +1481,18 @@ def poll_multisession(cfg, state, dry_run=False) -> int:
 
 
 def poll_once(cfg, state, dry_run=False) -> int:
+    """Single-session poll (no monitored_sessions configured): resolve the
+    watched session, then run the same engine poll_multisession uses so the two
+    paths cannot drift."""
     db = db_path()
     if not db.exists():
         log("error: opencode DB not found at %s (set OPENCODE_DB)" % db)
         return 1
-
     with connect_db(db) as con:
         base = select_session(con, cfg)
-        # Subagent (Task tool) work runs in child sessions. While a child has
-        # a live turn, the root's transcript is stale, so stall rules would
-        # misfire on the parent. Follow the active leaf for evaluate/continue.
-        session = active_leaf(con, base)
-        parts = session_parts(con, session["id"])
-        messages = session_messages(con, session["id"])
-
-    if not messages:
-        log("no messages yet in session %s; nothing to do" % session["id"])
-        if not dry_run and not state.get("prev_head"):
-            state["prev_head"] = git_head(cfg["project_dir"]) or ""
-            save_state(state)
+    if base is None:
         return 0
-
-    # Priming pass: establish baseline (prev_head, last evaluated message) and bail.
-    # primed marks a converged baseline: non-git project dirs leave prev_head
-    # as "", so guarding on prev_head alone re-primes (and skips evaluate) on
-    # every poll.
-    if not state.get("primed") and not state.get("prev_head"):
-        if dry_run:
-            log("[dry-run] would print baseline, not saved")
-            return 0
-        state["prev_head"] = git_head(cfg["project_dir"]) or ""
-        state["last_evaluated_mid"] = messages[-1]["id"]
-        state["primed"] = True
-        save_state(state)
-        log("primed baseline: prev_head=%s last_msg=%s" %
-            (state["prev_head"], state["last_evaluated_mid"]))
-        return 0
-
-    a = analyze(parts, messages)
-    action, reason, rule_hits = evaluate(cfg, session, parts, messages, state,
-                                         analysis=a)
-    # The leaf may be a child session absent from monitored_sessions; inherit
-    # the root's policy (auto_continue/auto_accept) for it.
-    ms = ((cfg.get("monitored_sessions") or {}).get(session["id"])
-          or (cfg.get("monitored_sessions") or {}).get(base["id"])
-          or {})
-    return apply_action(cfg, state, session, cfg["project_dir"], parts, messages,
-                        action, reason, rule_hits, dry_run=dry_run,
-                        enable_continue=bool(ms.get("auto_continue", True)),
-                        auto=bool(ms.get("auto_accept", True)), analysis=a)
+    return _poll_roots(cfg, state, [base["id"]], dry_run=dry_run)
 
 
 def _hawk_prompt(cfg, done=False) -> str:

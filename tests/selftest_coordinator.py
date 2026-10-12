@@ -1327,6 +1327,76 @@ def _self_test_impl():
         "OK" if ok_mp else "MISMATCH",
         "poll_multisession pick/stand-down/stalled-candidate"))
 
+    # PO: poll_once (single-session, no monitored_sessions) must run the same
+    #     engine as poll_multisession: resolve the watched session, follow the
+    #     active leaf, and key per-session state by that leaf.
+    mdb_po = Path(tempfile.mkdtemp()) / "opencode.db"
+    _mp = sqlite3.connect(str(mdb_po))
+    _mp.executescript(
+        "CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, title TEXT, "
+        "model TEXT, directory TEXT, time_updated INTEGER);"
+        "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, "
+        "time_created INTEGER, time_updated INTEGER, data TEXT);"
+        "CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, "
+        "time_created INTEGER, time_updated INTEGER, data TEXT);"
+        "CREATE TABLE todo (session_id TEXT, position INTEGER, content TEXT, "
+        "status TEXT, priority TEXT, time_created INTEGER, time_updated INTEGER);")
+    _llama = '{"providerID":"llama.cpp"}'
+    _mp.executemany("INSERT INTO session VALUES (?,?,?,?,?,?)",
+                    [("r", None, "R", _llama, "C:/pr", 9000),
+                     ("c", "r", "C", _llama, "C:/pr", 9050)])
+    _mp.executemany("INSERT INTO message VALUES (?,?,?,?,?)",
+                    [("mr1", "r", 500, 9000, '{"role":"assistant","time":{}}'),
+                     ("mc1", "c", 500, 9050, '{"role":"assistant","time":{}}')])
+    _mp.executemany("INSERT INTO part VALUES (?,?,?,?,?,?)",
+                    [("pr1", "mr1", "r", 500, 9000,
+                      '{"type":"text","text":"x"}'),
+                     ("pc1", "mc1", "c", 500, 9050,
+                      '{"type":"text","text":"x"}')])
+    _mp.commit()
+    _mp.close()
+    ok_po = False
+    g_po = poll_once.__globals__
+    o_aa_po = g_po["apply_action"]
+    o_save_po = g_po["save_state"]
+    orig_mp_po = db_path.__globals__["db_path"]
+    calls_po = []
+    try:
+        def _fake_apply_po(cfg_, st_, node_, proj_, pts_, msgs_, action_, reason_,
+                           hits_, dry_run=False, enable_continue=True, auto=True,
+                           node_sid=None, node_per=None, analysis=None):
+            calls_po.append(node_sid)
+            return 3
+        g_po["apply_action"] = _fake_apply_po
+        g_po["save_state"] = lambda st: None
+        db_path.__globals__["db_path"] = lambda: mdb_po
+        cfg_po = dict(CONFIG_DEFAULTS)
+        cfg_po["monitored_sessions"] = {}
+        cfg_po["session_id"] = ""
+        cfg_po["project_dir"] = "C:/pr"
+        cfg_po["idle_minutes"] = 30
+        st_po = {"per": {}}
+        r_po0 = poll_once(cfg_po, st_po)
+        ok_po0 = r_po0 == 0 and list(st_po["per"]) == ["c"] \
+            and "prev_head" in st_po["per"]["c"]
+        st_po2 = {"per": {}}
+        per_state(st_po2, "c")["prev_head"] = "h"
+        per_state(st_po2, "c")["last_evaluated_mid"] = "mc1"
+        r_po1 = poll_once(cfg_po, st_po2)
+        ok_po1 = r_po1 == 3 and calls_po == ["c"]
+        ok_po = all([ok_po0, ok_po1])
+    finally:
+        g_po["apply_action"] = o_aa_po
+        g_po["save_state"] = o_save_po
+        db_path.__globals__["db_path"] = orig_mp_po
+        shutil.rmtree(mdb_po.parent, ignore_errors=True)
+    results.append(("poll_once_engine", "pass", "pass", ok_po,
+                    "poll_once follows the leaf and keys per-state by it", []))
+    print("%-24s expect=%-8s got=%-8s %s  %s" % (
+        "poll_once_engine", "pass", "pass",
+        "OK" if ok_po else "MISMATCH",
+        "poll_once follows the leaf and keys per-state by it"))
+
     # AB: a non-git project dir converges after ONE priming pass (prev
     #     used to sit at "" and re-prime every pass, skipping evaluate).
     #     On the next pass, the completed turn at rest past idle reaches
