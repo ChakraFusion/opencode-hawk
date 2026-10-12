@@ -1285,6 +1285,24 @@ def evaluate(cfg, session, parts, messages, state, mstate=None, analysis=None):
     other reply clears the pending confirmation and the normal loop resumes, so
     an LLM that stops too eagerly is nudged back to work instead of closing the
     plan on a single token."""
+    # Rule catalog: the (first-match-wins) checks in this order. `reason` is the
+    # returning branch's text; `rule_hits` is [evidence] for the dashboard log.
+    #   1  gave_up_mid          same message as the no-progress give-up -> nothing
+    #   2  err_mid == last_mid  provider/overflow already escalated -> nothing
+    #   3  new err_kind         ooc/provider error -> context_overflow|provider_error
+    #   4  pending_question     question tool blocks the turn -> nothing
+    #   5  last_evaluated_mid   already judged (no wedge/re-stall) -> nothing
+    #   6  recent_activity      parts younger than idle_minutes -> nothing
+    #   7  post-done guard      STOP: DONE on recorded done_mid -> nothing
+    #   8  done double-tap      open items -> done_rejected; 1st -> confirm_done;
+    #                           a 2nd, distinct STOP: DONE -> done
+    #   9  human stop           STOP: NEEDS_DECISION/BLOCKED -> ask_user
+    #  10  unfinished turn      still generating -> nothing
+    #  11  llama liveness       server process gone -> llama_down
+    #  12  re-stall cadence     injected within re_stall_minutes -> nothing
+    #  13  llama idle check     model still decoding -> nothing
+    #  14  pending_done         unanswered confirm -> confirm_done
+    #  15  fall-through         -> continue (self-check prompt)
     mstate = state if mstate is None else mstate
     now_ms = int(time.time() * 1000)
     last_mid = messages[-1]["id"] if messages else None
