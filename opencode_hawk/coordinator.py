@@ -60,7 +60,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from datetime import datetime, timezone
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import hawk_linux
@@ -1694,299 +1694,353 @@ def _hawk_prompt(cfg, done=False) -> str:
     return grant + base.replace("[coordinator] ", "", 1)
 
 
+@dataclass
+class ActionCtx:
+    """All the inputs an action handler needs, so apply_action dispatches via a
+    registry instead of one ~290-line if/elif chain. analysis() caches the pure
+    analyze(parts, messages) result the poll already computed (up to 7x before)."""
+    cfg: dict
+    state: dict
+    target: dict
+    session: dict
+    project_dir: str
+    parts: list
+    messages: list
+    action: str
+    reason: str
+    rule_hits: list
+    dry_run: bool = False
+    enable_continue: bool = True
+    auto: bool = True
+    node_sid: str | None = None
+    _analysis_cache: object = field(default=None, repr=False, compare=False)
+
+    def analysis(self):
+        if self._analysis_cache is None:
+            self._analysis_cache = analyze(self.parts, self.messages)
+        return self._analysis_cache
+
+
+def _act_continue(ctx: "ActionCtx") -> int:
+    cfg, state, target, session = ctx.cfg, ctx.state, ctx.target, ctx.session
+    messages = ctx.messages
+    if not ctx.enable_continue:
+        if ctx.node_sid:
+            log("continue suppressed for %s (auto_continue off)" % ctx.node_sid)
+        # Advance last_evaluated_mid so this session stops being a
+        # candidate; otherwise it's picked every poll and starves others.
+        if messages:
+            target["last_evaluated_mid"] = messages[-1]["id"]
+            save_state(state)
+        return 0
+    last_mid = messages[-1]["id"]
+    cont_fp = ""
+    cont_cfp = ""
+    if ctx.action == "confirm_done":
+        msg = _hawk_prompt(cfg, done=True)
+        if ctx.dry_run:
+            log("[dry-run] WOULD ASK CONFIRMATION OF STOP: DONE")
+            return 0
+    elif ctx.action == "done_rejected":
+        msg = cfg["done_open_items_message"].replace(
+            "{items}", "\n".join("- " + i for i in ctx.rule_hits))
+        if ctx.dry_run:
+            log("[dry-run] WOULD SEND BACK STOP: DONE (open items)")
+            return 0
+    else:
+        msg = _hawk_prompt(cfg, done=False)
+        if ctx.dry_run:
+            log("[dry-run] WOULD INJECT self-check prompt")
+            return 0
+        # ── No-progress give-up ──────────────────────────────────────
+        # re_stall_minutes bounds how OFTEN we nudge, but nothing stopped
+        # Hawk nudging a wedged session forever: same last message, project
+        # HEAD unchanged. After no_progress_limit such self-checks, stop and
+        # hand the session to the human instead of nudging again (this is
+        # the slow-loop filter the auto-resume plugin lacked). Both signals
+        # must say "no progress": an identical assistant message AND an
+        # unmoved git HEAD.
+        a = ctx.analysis()
+        cont_fp = text_fingerprint(a["last_assistant"])
+        cont_cfp = coarse_fingerprint(a["last_assistant"])
+        cur_head = git_head(ctx.project_dir) or ""
+        prev_fp = str(target.get("progress_fp") or "")
+        prev_cfp = str(target.get("progress_cfp") or "")
+        limit = int(cfg.get("no_progress_limit", 3) or 0)
+        coarse_on = bool(cfg.get("no_progress_coarse", True))
+        same_text = bool(prev_fp and cont_fp and cont_fp == prev_fp) or \
+            (coarse_on and bool(prev_cfp and cont_cfp and cont_cfp == prev_cfp))
+        if (limit > 0 and same_text
+                and cur_head == str(target.get("prev_head") or "")
+                and int(target.get("continues") or 0) >= limit):
+            reason_g = ("no progress after %d self-checks: the worker repeated "
+                        "its last message and the project HEAD did not move"
+                        % int(target.get("continues") or 0))
+            target["gave_up_mid"] = last_mid
+            target["last_evaluated_mid"] = last_mid
+            target["last_injected_at"] = int(time.time() * 1000)
+            save_state(state)
+            path = write_escalation(session, ctx.project_dir, reason_g, ctx.rule_hits, a, cfg)
+            log("GIVE UP (no progress): %s -> %s" % (reason_g, path))
+            if cfg.get("record_escalations_to_session", True):
+                try:
+                    note = ("[hawk] Stopped auto-continuing this session: " + reason_g
+                            + "\nReport: %s\nReply to resume, or start a new task." % path)
+                    append_session_note(db_path(), session["id"], note, _model_field(session))
+                except Exception as _ne:
+                    log("give_up: session note failed: %s" % _ne)
+            try:
+                from . import notify
+                notify.notify_escalation(cfg, session, reason_g, ctx.rule_hits, a, str(path))
+            except Exception as _ne:
+                log("give_up: notification failed: %s" % _ne)
+            return 2
+    if not send_continue(cfg, session["id"], ctx.project_dir, msg, auto=ctx.auto):
+        # Delivery failed. Do NOT advance last_evaluated_mid/continues: the
+        # session is still pending, so the next poll re-evaluates and retries
+        # the delivery once the CLI is available again. Write an escalation
+        # artifact so the failure is visible, but throttle it to the
+        # re-stall cadence so a hard-down CLI does not spam one file per poll.
+        now_ms = int(time.time() * 1000)
+        last_fail = int(target.get("last_continue_fail_at") or 0)
+        re_stall_ms = int(cfg.get("re_stall_minutes", 45)) * 60_000
+        if now_ms - last_fail >= re_stall_ms:
+            target["last_continue_fail_at"] = now_ms
+            save_state(state)
+            a = ctx.analysis()
+            path = write_escalation(session, ctx.project_dir, ctx.reason or
+                                    "self-check delivery failed (CLI unavailable); will retry",
+                                    ctx.rule_hits, a, cfg)
+            log("ESCALATE: self-check delivery failed; the staged injection at "
+                "last_evaluated_mid=%s is pending retry (check that OPENCODE_BIN "
+                "points at a working CLI) -> %s" % (last_mid, path))
+            try:
+                from . import notify
+                notify.notify_escalation(cfg, session,
+                                         ctx.reason or "self-check delivery failed (CLI unavailable); will retry",
+                                         ctx.rule_hits, a, str(path))
+            except Exception:
+                pass
+        else:
+            log("self-check delivery failed at last_evaluated_mid=%s; "
+                "retrying on a later poll (last artifact %ds ago)"
+                % (last_mid, (now_ms - last_fail) // 1000))
+        return 2
+    target["last_evaluated_mid"] = last_mid
+    target["prev_head"] = git_head(ctx.project_dir) or target.get("prev_head")
+    if ctx.action == "continue":
+        target["continues"] = target.get("continues", 0) + 1
+        target["progress_fp"] = cont_fp
+        target["progress_cfp"] = cont_cfp
+    target.pop("last_continue_fail_at", None)
+    save_state(state)
+    if ctx.action == "continue":
+        try:
+            from . import notify
+            notify.record_event(
+                cfg, "continue", "Self-check injected",
+                "[hawk] <b>self-check injected</b>\n<i>%s</i>\n\nSession: %s"
+                % (ctx.reason, (session.get("title") or "")[:60]),
+                eid="cont:%s:%s" % (session["id"], last_mid),
+                meta={"session": str(session["id"])[-8:],
+                      "title": (session.get("title") or "")[:60]})
+        except Exception:
+            pass
+    if ctx.action == "confirm_done":
+        log("CONFIRMATION ASKED (first STOP: DONE)")
+        try:
+            from . import notify
+            a = ctx.analysis()
+            notify.notify_escalation(cfg, session, ctx.reason, ctx.rule_hits, a, "",
+                                     kind="confirm_done")
+        except Exception:
+            pass
+    elif ctx.action == "done_rejected":
+        log("DONE REJECTED (open items): %s" % " | ".join(ctx.rule_hits))
+    else:
+        log("SELF-CHECK injected")
+    injected_id = await_injected_message_id(
+        session["id"], max((m["time"] for m in messages if m.get("role") == "user"), default=0))
+    if injected_id:
+        target["last_injected_mid"] = injected_id
+    target["last_injected_at"] = int(time.time() * 1000)
+    save_state(state)
+    return 3
+
+
+def _act_llama_down(ctx: "ActionCtx") -> int:
+    cfg, state, target = ctx.cfg, ctx.state, ctx.target
+    # Liveness watchdog: llama-server process is gone. Respawn it via the
+    # bat file and notify the user. This is NOT a session-level event —
+    # it's infrastructure. We do NOT advance last_evaluated_mid so the
+    # session is re-evaluated on the next poll (by which time the server
+    # should be back).
+    if ctx.dry_run:
+        log("[dry-run] WOULD RESPAWN llama-server (process not found)")
+        return 0
+    target.pop("last_injected_at", None)  # clear cooldown so next poll proceeds
+    save_state(state)
+    # Lock-guarded so a concurrent monitor supervisor respawn never
+    # double-spawns; when the supervisor already holds the lock, treat
+    # the respawn as handled by it.
+    ok = False
+    try:
+        from . import llama_restart
+        if llama_restart._lock("flow:llama_down"):
+            try:
+                ok = llama_respawn(cfg)
+            finally:
+                llama_restart._unlock()
+        else:
+            ok = True  # supervisor is already on it
+    except Exception:
+        ok = llama_respawn(cfg)
+    try:
+        from . import notify
+        if ok:
+            notify.send_text(
+                cfg, "[hawk] <b>llama-server auto-restarted</b>\n"
+                     "<i>process was dead; watchdog respawned it via bat file</i>",
+                kind="llama",
+                eid="llamarestart:%d" % int(time.time()),
+                meta={"kind": "llama_down"})
+        else:
+            notify.send_text(
+                cfg, "[hawk] <b>llama-server DOWN</b>\n"
+                     "<i>watchdog respawn FAILED — manual restart needed</i>",
+                kind="llama",
+                eid="llamafail:%d" % int(time.time()),
+                meta={"kind": "llama_down"})
+    except Exception:
+        pass
+    return 7 if ok else 8
+
+
+def _act_error(ctx: "ActionCtx") -> int:
+    cfg, state, target, session = ctx.cfg, ctx.state, ctx.target, ctx.session
+    action = ctx.action
+    last_mid = ctx.messages[-1]["id"] if ctx.messages else ""
+    if ctx.dry_run:
+        log("[dry-run] WOULD ESCALATE %s: %s" % (action, ctx.reason))
+        return 0
+    target["err_mid"] = last_mid
+    target["err_kind"] = "ooc" if action == "context_overflow" else "provider"
+    if last_mid:
+        target["last_evaluated_mid"] = last_mid
+    target["last_injected_at"] = int(time.time() * 1000)  # hold the cadence too
+    save_state(state)
+    a = ctx.analysis()
+    rkind = "context overflow" if action == "context_overflow" else "provider error"
+    reason2 = ("session stopped on a %s that a self-check cannot clear: %s"
+               % (rkind, ctx.reason))
+    path = write_escalation(session, ctx.project_dir, reason2, ctx.rule_hits, a, cfg)
+    log("STOP (%s): %s -> %s" % (rkind, reason2, path))
+    if cfg.get("record_escalations_to_session", True):
+        try:
+            note = ("[hawk] Stopped auto-continuing this session: " + reason2
+                    + "\nReport: %s\nReply to resume, or start a new task." % path)
+            append_session_note(db_path(), session["id"], note, _model_field(session))
+        except Exception as _ne:
+            log("error stop: session note failed: %s" % _ne)
+    try:
+        from . import notify
+        notify.notify_escalation(cfg, session, reason2, ctx.rule_hits, a, str(path))
+    except Exception as _ne:
+        log("error stop: notification failed: %s" % _ne)
+    return 2
+
+
+def _act_ask_user(ctx: "ActionCtx") -> int:
+    cfg, state, target, session = ctx.cfg, ctx.state, ctx.target, ctx.session
+    last_mid = ctx.messages[-1]["id"]
+    if ctx.dry_run:
+        log("[dry-run] WOULD ASK THE USER: %s" % ctx.reason)
+        return 0
+    target["asked_mid"] = last_mid
+    target["last_evaluated_mid"] = last_mid
+    save_state(state)
+    a = ctx.analysis()
+    path = write_escalation(session, ctx.project_dir, ctx.reason, ctx.rule_hits, a, cfg)
+    log("ASKED USER (no prompts until an answer): %s" % ctx.reason)
+    try:
+        from . import notify
+        notify.notify_escalation(cfg, session, ctx.reason, ctx.rule_hits, a, str(path), kind="escalation")
+    except Exception as e:
+        log("ask_user: notification failed: %s" % e)
+    return 9
+
+
+def _act_done(ctx: "ActionCtx") -> int:
+    cfg, state, target, session = ctx.cfg, ctx.state, ctx.target, ctx.session
+    reason = ctx.reason
+    rule_hits = list(ctx.rule_hits)
+    # Build plan finished — a POSITIVE stop, not an error. No further
+    # self-checks; write a "complete" artifact and reset the counter.
+    last_mid = ctx.messages[-1]["id"]
+    if ctx.dry_run:
+        log("[dry-run] WOULD MARK BUILD PLAN COMPLETE: %s" % reason)
+        return 0
+    target["last_evaluated_mid"] = last_mid
+    target["continues"] = 0
+    target["done_mid"] = last_mid
+    save_state(state)
+    a = ctx.analysis()
+    open_items = (open_todos(session.get("id")) + done_open_items(a["last_assistant"]))[:8]
+    if open_items:
+        reason += "; WARNING: the agent's message still names open items"
+        rule_hits = list(rule_hits) + ["open item: " + i for i in open_items]
+    path = write_plan_done(session, ctx.project_dir, reason, rule_hits, a, cfg)
+    log("DONE: build plan complete -> %s" % path)
+    if cfg.get("record_escalations_to_session", True):
+        db = db_path()
+        note = build_plan_done_note(session, reason, rule_hits, str(path))
+        if append_session_note(db, session["id"], note, _model_field(session)):
+            log("DONE: recorded in session transcript")
+    try:
+        from . import notify
+        warn = ("\n\n\u26a0\ufe0f <b>The agent still mentions open items:</b>\n%s\nReply to send it back to work."
+                % "\n".join("- " + html.escape(i, quote=False) for i in open_items)) if open_items else ""
+        notify.send_text(
+            cfg, "[hawk] <b>build plan complete</b>\n<i>%s</i>\n\nSession: %s%s"
+            % (html.escape(reason, quote=False), (session.get("title") or "")[:60], warn),
+            eid="plandone:%s:%s" % (session["id"], last_mid),
+            meta={"session": str(session["id"])[-8:],
+                  "title": (session.get("title") or "")[:60]})
+    except Exception as _ne:
+        log("DONE: notification failed: %s" % _ne)
+    return 6
+
+
+def _act_nothing(ctx: "ActionCtx") -> int:
+    # action == nothing
+    log("no action: %s" % ctx.reason)
+    return 0
+
+
+_ACTION_HANDLERS = {
+    "continue": _act_continue,
+    "confirm_done": _act_continue,
+    "done_rejected": _act_continue,
+    "llama_down": _act_llama_down,
+    "context_overflow": _act_error,
+    "provider_error": _act_error,
+    "ask_user": _act_ask_user,
+    "done": _act_done,
+    "nothing": _act_nothing,
+}
+
+
 def apply_action(cfg, state, session, project_dir, parts, messages, action,
                  reason, rule_hits, dry_run=False, enable_continue=True, auto=True,
                  node_sid=None, node_per=None, analysis=None) -> int:
     target = node_per if node_per is not None else state
-    # analyze() is a pure function of (parts, messages); evaluate() already
-    # computed it this poll, so compute it at most once here instead of on every
-    # action branch (it used to run up to 7x per poll).
-    _an = {"v": analysis}
-
-    def _analysis():
-        if _an["v"] is None:
-            _an["v"] = analyze(parts, messages)
-        return _an["v"]
     log_decision(session["id"], action, reason, rule_hits)
-    if action in ("continue", "confirm_done", "done_rejected"):
-        if not enable_continue:
-            if node_sid:
-                log("continue suppressed for %s (auto_continue off)" % node_sid)
-            # Advance last_evaluated_mid so this session stops being a
-            # candidate; otherwise it's picked every poll and starves others.
-            if messages:
-                target["last_evaluated_mid"] = messages[-1]["id"]
-                save_state(state)
-            return 0
-        last_mid = messages[-1]["id"]
-        cont_fp = ""
-        cont_cfp = ""
-        if action == "confirm_done":
-            msg = _hawk_prompt(cfg, done=True)
-            if dry_run:
-                log("[dry-run] WOULD ASK CONFIRMATION OF STOP: DONE")
-                return 0
-        elif action == "done_rejected":
-            msg = cfg["done_open_items_message"].replace(
-                "{items}", "\n".join("- " + i for i in rule_hits))
-            if dry_run:
-                log("[dry-run] WOULD SEND BACK STOP: DONE (open items)")
-                return 0
-        else:
-            msg = _hawk_prompt(cfg, done=False)
-            if dry_run:
-                log("[dry-run] WOULD INJECT self-check prompt")
-                return 0
-            # ── No-progress give-up ──────────────────────────────────────
-            # re_stall_minutes bounds how OFTEN we nudge, but nothing stopped
-            # Hawk nudging a wedged session forever: same last message, project
-            # HEAD unchanged. After no_progress_limit such self-checks, stop and
-            # hand the session to the human instead of nudging again (this is
-            # the slow-loop filter the auto-resume plugin lacked). Both signals
-            # must say "no progress": an identical assistant message AND an
-            # unmoved git HEAD.
-            a = _analysis()
-            cont_fp = text_fingerprint(a["last_assistant"])
-            cont_cfp = coarse_fingerprint(a["last_assistant"])
-            cur_head = git_head(project_dir) or ""
-            prev_fp = str(target.get("progress_fp") or "")
-            prev_cfp = str(target.get("progress_cfp") or "")
-            limit = int(cfg.get("no_progress_limit", 3) or 0)
-            coarse_on = bool(cfg.get("no_progress_coarse", True))
-            same_text = bool(prev_fp and cont_fp and cont_fp == prev_fp) or \
-                (coarse_on and bool(prev_cfp and cont_cfp and cont_cfp == prev_cfp))
-            if (limit > 0 and same_text
-                    and cur_head == str(target.get("prev_head") or "")
-                    and int(target.get("continues") or 0) >= limit):
-                reason_g = ("no progress after %d self-checks: the worker repeated "
-                            "its last message and the project HEAD did not move"
-                            % int(target.get("continues") or 0))
-                target["gave_up_mid"] = last_mid
-                target["last_evaluated_mid"] = last_mid
-                target["last_injected_at"] = int(time.time() * 1000)
-                save_state(state)
-                path = write_escalation(session, project_dir, reason_g, rule_hits, a, cfg)
-                log("GIVE UP (no progress): %s -> %s" % (reason_g, path))
-                if cfg.get("record_escalations_to_session", True):
-                    try:
-                        note = ("[hawk] Stopped auto-continuing this session: " + reason_g
-                                + "\nReport: %s\nReply to resume, or start a new task." % path)
-                        append_session_note(db_path(), session["id"], note, _model_field(session))
-                    except Exception as _ne:
-                        log("give_up: session note failed: %s" % _ne)
-                try:
-                    from . import notify
-                    notify.notify_escalation(cfg, session, reason_g, rule_hits, a, str(path))
-                except Exception as _ne:
-                    log("give_up: notification failed: %s" % _ne)
-                return 2
-        if not send_continue(cfg, session["id"], project_dir, msg, auto=auto):
-            # Delivery failed. Do NOT advance last_evaluated_mid/continues: the
-            # session is still pending, so the next poll re-evaluates and retries
-            # the delivery once the CLI is available again. Write an escalation
-            # artifact so the failure is visible, but throttle it to the
-            # re-stall cadence so a hard-down CLI does not spam one file per poll.
-            now_ms = int(time.time() * 1000)
-            last_fail = int(target.get("last_continue_fail_at") or 0)
-            re_stall_ms = int(cfg.get("re_stall_minutes", 45)) * 60_000
-            if now_ms - last_fail >= re_stall_ms:
-                target["last_continue_fail_at"] = now_ms
-                save_state(state)
-                a = _analysis()
-                path = write_escalation(session, project_dir, reason or
-                                        "self-check delivery failed (CLI unavailable); will retry",
-                                        rule_hits, a, cfg)
-                log("ESCALATE: self-check delivery failed; the staged injection at "
-                    "last_evaluated_mid=%s is pending retry (check that OPENCODE_BIN "
-                    "points at a working CLI) -> %s" % (last_mid, path))
-                try:
-                    from . import notify
-                    notify.notify_escalation(cfg, session,
-                                             reason or "self-check delivery failed (CLI unavailable); will retry",
-                                             rule_hits, a, str(path))
-                except Exception:
-                    pass
-            else:
-                log("self-check delivery failed at last_evaluated_mid=%s; "
-                    "retrying on a later poll (last artifact %ds ago)"
-                    % (last_mid, (now_ms - last_fail) // 1000))
-            return 2
-        target["last_evaluated_mid"] = last_mid
-        target["prev_head"] = git_head(project_dir) or target.get("prev_head")
-        if action == "continue":
-            target["continues"] = target.get("continues", 0) + 1
-            target["progress_fp"] = cont_fp
-            target["progress_cfp"] = cont_cfp
-        target.pop("last_continue_fail_at", None)
-        save_state(state)
-        if action == "continue":
-            try:
-                from . import notify
-                notify.record_event(
-                    cfg, "continue", "Self-check injected",
-                    "[hawk] <b>self-check injected</b>\n<i>%s</i>\n\nSession: %s"
-                    % (reason, (session.get("title") or "")[:60]),
-                    eid="cont:%s:%s" % (session["id"], last_mid),
-                    meta={"session": str(session["id"])[-8:],
-                          "title": (session.get("title") or "")[:60]})
-            except Exception:
-                pass
-        if action == "confirm_done":
-            log("CONFIRMATION ASKED (first STOP: DONE)")
-            try:
-                from . import notify
-                a = _analysis()
-                notify.notify_escalation(cfg, session, reason, rule_hits, a, "",
-                                         kind="confirm_done")
-            except Exception:
-                pass
-        elif action == "done_rejected":
-            log("DONE REJECTED (open items): %s" % " | ".join(rule_hits))
-        else:
-            log("SELF-CHECK injected")
-        injected_id = await_injected_message_id(
-            session["id"], max((m["time"] for m in messages if m.get("role") == "user"), default=0))
-        if injected_id:
-            target["last_injected_mid"] = injected_id
-        target["last_injected_at"] = int(time.time() * 1000)
-        save_state(state)
-        return 3
-
-    if action == "llama_down":
-        # Liveness watchdog: llama-server process is gone. Respawn it via the
-        # bat file and notify the user. This is NOT a session-level event —
-        # it's infrastructure. We do NOT advance last_evaluated_mid so the
-        # session is re-evaluated on the next poll (by which time the server
-        # should be back).
-        if dry_run:
-            log("[dry-run] WOULD RESPAWN llama-server (process not found)")
-            return 0
-        target.pop("last_injected_at", None)  # clear cooldown so next poll proceeds
-        save_state(state)
-        # Lock-guarded so a concurrent monitor supervisor respawn never
-        # double-spawns; when the supervisor already holds the lock, treat
-        # the respawn as handled by it.
-        ok = False
-        try:
-            from . import llama_restart
-            if llama_restart._lock("flow:llama_down"):
-                try:
-                    ok = llama_respawn(cfg)
-                finally:
-                    llama_restart._unlock()
-            else:
-                ok = True  # supervisor is already on it
-        except Exception:
-            ok = llama_respawn(cfg)
-        try:
-            from . import notify
-            if ok:
-                notify.send_text(
-                    cfg, "[hawk] <b>llama-server auto-restarted</b>\n"
-                         "<i>process was dead; watchdog respawned it via bat file</i>",
-                    kind="llama",
-                    eid="llamarestart:%d" % int(time.time()),
-                    meta={"kind": "llama_down"})
-            else:
-                notify.send_text(
-                    cfg, "[hawk] <b>llama-server DOWN</b>\n"
-                         "<i>watchdog respawn FAILED — manual restart needed</i>",
-                    kind="llama",
-                    eid="llamafail:%d" % int(time.time()),
-                    meta={"kind": "llama_down"})
-        except Exception:
-            pass
-        return 7 if ok else 8
-
-    if action in ("context_overflow", "provider_error"):
-        last_mid = messages[-1]["id"] if messages else ""
-        if dry_run:
-            log("[dry-run] WOULD ESCALATE %s: %s" % (action, reason))
-            return 0
-        target["err_mid"] = last_mid
-        target["err_kind"] = "ooc" if action == "context_overflow" else "provider"
-        if last_mid:
-            target["last_evaluated_mid"] = last_mid
-        target["last_injected_at"] = int(time.time() * 1000)  # hold the cadence too
-        save_state(state)
-        a = _analysis()
-        rkind = "context overflow" if action == "context_overflow" else "provider error"
-        reason2 = ("session stopped on a %s that a self-check cannot clear: %s"
-                   % (rkind, reason))
-        path = write_escalation(session, project_dir, reason2, rule_hits, a, cfg)
-        log("STOP (%s): %s -> %s" % (rkind, reason2, path))
-        if cfg.get("record_escalations_to_session", True):
-            try:
-                note = ("[hawk] Stopped auto-continuing this session: " + reason2
-                        + "\nReport: %s\nReply to resume, or start a new task." % path)
-                append_session_note(db_path(), session["id"], note, _model_field(session))
-            except Exception as _ne:
-                log("error stop: session note failed: %s" % _ne)
-        try:
-            from . import notify
-            notify.notify_escalation(cfg, session, reason2, rule_hits, a, str(path))
-        except Exception as _ne:
-            log("error stop: notification failed: %s" % _ne)
-        return 2
-
-    if action == "ask_user":
-        last_mid = messages[-1]["id"]
-        if dry_run:
-            log("[dry-run] WOULD ASK THE USER: %s" % reason)
-            return 0
-        target["asked_mid"] = last_mid
-        target["last_evaluated_mid"] = last_mid
-        save_state(state)
-        a = _analysis()
-        path = write_escalation(session, project_dir, reason, rule_hits, a, cfg)
-        log("ASKED USER (no prompts until an answer): %s" % reason)
-        try:
-            from . import notify
-            notify.notify_escalation(cfg, session, reason, rule_hits, a, str(path), kind="escalation")
-        except Exception as e:
-            log("ask_user: notification failed: %s" % e)
-        return 9
-
-    if action == "done":
-        # Build plan finished — a POSITIVE stop, not an error. No further
-        # self-checks; write a "complete" artifact and reset the counter.
-        last_mid = messages[-1]["id"]
-        if dry_run:
-            log("[dry-run] WOULD MARK BUILD PLAN COMPLETE: %s" % reason)
-            return 0
-        target["last_evaluated_mid"] = last_mid
-        target["continues"] = 0
-        target["done_mid"] = last_mid
-        save_state(state)
-        a = _analysis()
-        open_items = (open_todos(session.get("id")) + done_open_items(a["last_assistant"]))[:8]
-        if open_items:
-            reason += "; WARNING: the agent's message still names open items"
-            rule_hits = list(rule_hits) + ["open item: " + i for i in open_items]
-        path = write_plan_done(session, project_dir, reason, rule_hits, a, cfg)
-        log("DONE: build plan complete -> %s" % path)
-        if cfg.get("record_escalations_to_session", True):
-            db = db_path()
-            note = build_plan_done_note(session, reason, rule_hits, str(path))
-            if append_session_note(db, session["id"], note, _model_field(session)):
-                log("DONE: recorded in session transcript")
-        try:
-            from . import notify
-            warn = ("\n\n\u26a0\ufe0f <b>The agent still mentions open items:</b>\n%s\nReply to send it back to work."
-                    % "\n".join("- " + html.escape(i, quote=False) for i in open_items)) if open_items else ""
-            notify.send_text(
-                cfg, "[hawk] <b>build plan complete</b>\n<i>%s</i>\n\nSession: %s%s"
-                % (html.escape(reason, quote=False), (session.get("title") or "")[:60], warn),
-                eid="plandone:%s:%s" % (session["id"], last_mid),
-                meta={"session": str(session["id"])[-8:],
-                      "title": (session.get("title") or "")[:60]})
-        except Exception as _ne:
-            log("DONE: notification failed: %s" % _ne)
-        return 6
-
-    # action == nothing
-    log("no action: %s" % reason)
-    return 0
+    ctx = ActionCtx(cfg=cfg, state=state, target=target, session=session,
+                    project_dir=project_dir, parts=parts, messages=messages,
+                    action=action, reason=reason, rule_hits=rule_hits,
+                    dry_run=dry_run, enable_continue=enable_continue, auto=auto,
+                    node_sid=node_sid, _analysis_cache=analysis)
+    return _ACTION_HANDLERS.get(action, _act_nothing)(ctx)
 
 
 def _poll_worker(cfg, state, args):

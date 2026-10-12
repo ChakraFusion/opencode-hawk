@@ -1562,6 +1562,31 @@ def _self_test_impl():
     print("%-24s expect=%-8s got=%-8s %s  %s" % (
         "ctx_poll_ctx", "pass", "pass", "OK" if ok_ctx else "MISMATCH", "ctx_poll_ctx"))
 
+    # AR: apply_action dispatches through _ACTION_HANDLERS; the action families
+    #     share a handler and an unknown action falls back to _act_nothing.
+    ok_reg = (_ACTION_HANDLERS.get("continue") is _act_continue
+              and _ACTION_HANDLERS.get("confirm_done") is _act_continue
+              and _ACTION_HANDLERS.get("done_rejected") is _act_continue
+              and _ACTION_HANDLERS.get("llama_down") is _act_llama_down
+              and _ACTION_HANDLERS.get("context_overflow") is _act_error
+              and _ACTION_HANDLERS.get("provider_error") is _act_error
+              and _ACTION_HANDLERS.get("ask_user") is _act_ask_user
+              and _ACTION_HANDLERS.get("done") is _act_done
+              and _ACTION_HANDLERS.get("nothing") is _act_nothing)
+    g_ar = apply_action.__globals__
+    o_nothing_ar = g_ar["_act_nothing"]
+    try:
+        g_ar["_act_nothing"] = lambda ctx: 42
+        r_ar = apply_action(dict(CONFIG_DEFAULTS), {}, {"id": "s"}, "C:/p",
+                            [], [{"id": "m"}], "weird_action", "r", [])
+        ok_disp = r_ar == 42
+    finally:
+        g_ar["_act_nothing"] = o_nothing_ar
+    ok_ar = ok_reg and ok_disp
+    results.append(("action_registry", "pass", "pass", ok_ar, "action_registry", []))
+    print("%-24s expect=%-8s got=%-8s %s  %s" % (
+        "action_registry", "pass", "pass", "OK" if ok_ar else "MISMATCH", "action_registry"))
+
     # AB: a non-git project dir converges after ONE priming pass (prev
     #     used to sit at "" and re-prime every pass, skipping evaluate).
     #     On the next pass, the completed turn at rest past idle reaches
