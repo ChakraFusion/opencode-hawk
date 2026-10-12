@@ -13,6 +13,8 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
+from typing import Any
+
 from . import hawk_linux
 
 from . import coordinator as core  # shared namespace: see the module docstring
@@ -472,11 +474,11 @@ def _pdh_gpu_init() -> bool:
             pdh.PdhCloseQuery(q)
             core._PDH_GPU["err"] = "PdhAddEnglishCounterW"
             return False
-        mc = C.c_void_p()
+        mc: Any = C.c_void_p()
         if pdh.PdhAddEnglishCounterW(q, core._GPU_MEM_COUNTER, 0,
                                      C.byref(mc)) != 0:
             mc = None  # adapter-memory counter absent -> engine-only mode
-        dc = C.c_void_p()
+        dc: Any = C.c_void_p()
         if pdh.PdhAddEnglishCounterW(q, core._DISK_IDLE_COUNTER, 0,
                                      C.byref(dc)) != 0:
             dc = None  # disk counter absent (rare) -> no disk activity feed
@@ -611,7 +613,7 @@ def gpu_engine_max(state=None) -> float:
     return core._PDH_SAMPLE.get("val", 0.0)
 
 
-_PDH_SAMPLE = {"val": 0.0, "vram_mb": None, "gpu_inst": [], "gpu_eng": [],
+_PDH_SAMPLE: dict = {"val": 0.0, "vram_mb": None, "gpu_inst": [], "gpu_eng": [],
                "disk_inst": [], "t": 0.0}
 
 

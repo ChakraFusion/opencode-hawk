@@ -460,7 +460,7 @@ def llama_telemetry_payload() -> dict:
 # probed once via PowerShell and cached; live readings come from the cheap
 # per-second PDH sampler in coordinator.
 _HW_LOCK = threading.Lock()
-_HW = {"sticks": None, "sticks_info": [], "gpu_totals": None,
+_HW: dict = {"sticks": None, "sticks_info": [], "gpu_totals": None,
        "disk_inv": None, "disks": [], "disks_at": 0.0,
        "gpus": [], "gpus_at": 0.0}
 HW_TTL_S = 5.0     # live readings (disk activity, GPU usage) cached 5 s
@@ -654,8 +654,8 @@ def hw_disk_activity() -> list[dict]:
 
 
 _tele_lock = threading.Lock()
-_tele_series = []
-_tele_compactions = []
+_tele_series: list = []
+_tele_compactions: list = []
 _tele_last_raw = None   # previous raw /slots sample for the tps diff (reset on idle)
 _tele_meta = {
     "pid": None, "n_ctx": 0, "processing": False, "cpu_frac": 0.0,

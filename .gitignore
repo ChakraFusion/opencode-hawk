@@ -29,6 +29,13 @@ __pycache__/
 *.pyc
 .venv/
 
+# Test / lint tooling output
+.coverage
+.coverage.*
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+
 # Tool / editor scratch
 .opencode/
 .playwright-mcp/

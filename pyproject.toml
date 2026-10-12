@@ -32,3 +32,42 @@ packages = ["opencode_hawk"]
 
 [tool.setuptools.package-data]
 opencode_hawk = ["web/*", "config.example.json", "opencode-plugin/*"]
+
+# ---- Dev tooling (see tests/test_selftests.py and .github/workflows/tests.yml) ----
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.coverage.run]
+source = ["opencode_hawk"]
+
+[tool.coverage.report]
+show_missing = true
+
+[tool.ruff]
+line-length = 120
+exclude = [".git", ".opencode", "build", ".ruff_cache"]
+
+[tool.ruff.lint]
+# Deliberately small: only rules the code already passes, so the gate stays
+# green and catches regressions. Broaden the list as rules get cleaned up.
+select = ["E9", "F63", "F7", "F82", "F811"]
+
+[tool.ruff.lint.per-file-ignores]
+# Selftests do globals().update(vars(hawk)), so names are bound dynamically.
+"tests/*" = ["F821"]
+
+[tool.mypy]
+python_version = "3.10"
+# "Pure" helpers only: platform/IO modules with no dependency on the
+# coordinator's dynamically-bound namespace.
+files = [
+  "opencode_hawk/probes.py",
+  "opencode_hawk/telemetry.py",
+  "opencode_hawk/hawk_linux.py",
+  "opencode_hawk/llama_tasks.py",
+]
+ignore_missing_imports = true
+follow_imports = "skip"
+warn_unused_ignores = true

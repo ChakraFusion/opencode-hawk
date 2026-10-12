@@ -33,7 +33,7 @@ SYS_BLOCK = "/sys/block"
 PROC_ROOT = "/proc"
 _GPU_TTL_S = 1.0
 _lock = threading.Lock()
-_gpu_cache = {"at": 0.0, "gpus": []}
+_gpu_cache: dict = {"at": 0.0, "gpus": []}
 _name_cache: dict[str, str] = {}
 _disk_prev: dict = {"t": 0.0, "busy": {}}
 
