@@ -81,7 +81,10 @@ DEFAULT_POLL_MINUTES = 10
 PLAN_DONE_MARKERS = ["STOP: DONE", "BUILD PLAN: COMPLETE", "PLAN: COMPLETE",
                      "ALL TASKS COMPLETE", "ALL TASKS DONE"]
 
+CONFIG_VERSION = 1   # bumped when a config upgrade needs code (see load_config)
+
 CONFIG_DEFAULTS = {
+    "version": CONFIG_VERSION,
     # Machine-specific paths: MUST be set in config.json on first deploy.
     # Empty defaults are intentional so the code never silently targets a
     # developer's own folders from a fresh clone (see validate_config()).
@@ -413,10 +416,36 @@ def save_json(path: Path, obj) -> None:
             time.sleep(0.05 * (attempt + 1))
 
 
+# Nested config subtrees whose absent keys carry meaning at READ time, so they
+# must not be back-filled from CONFIG_DEFAULTS: notify.kinds falls back to
+# notify.DEFAULT_NOTIFY_KINDS (a broader list) when the key is absent, not to
+# CONFIG_DEFAULTS' sample list. Everything else may be deep-merged so a future
+# nested default reaches existing installs.
+_CONFIG_NO_DEEP_MERGE = {"notify"}
+
+
+def _deep_merge_defaults(user: dict, defaults: dict) -> dict:
+    """Fill every default the user file omits, recursing into nested dicts, so
+    new defaults reach existing configs on upgrade. User values always win."""
+    for k, dv in defaults.items():
+        if k not in user:
+            user[k] = copy.deepcopy(dv)
+        elif k in _CONFIG_NO_DEEP_MERGE:
+            continue
+        elif isinstance(dv, dict) and isinstance(user.get(k), dict):
+            _deep_merge_defaults(user[k], dv)
+    return user
+
+
 def load_config() -> dict:
-    cfg = load_json(home_dir() / "config.json", CONFIG_DEFAULTS)
-    for k, v in CONFIG_DEFAULTS.items():
-        cfg.setdefault(k, v)
+    raw = load_json(home_dir() / "config.json", {})
+    if not isinstance(raw, dict):
+        raw = {}
+    cfg = _deep_merge_defaults(raw, CONFIG_DEFAULTS)
+    try:
+        cfg["version"] = max(int(cfg.get("version") or 0), CONFIG_VERSION)
+    except (TypeError, ValueError):
+        cfg["version"] = CONFIG_VERSION
     return cfg
 
 
@@ -455,14 +484,24 @@ def validate_config(cfg: dict) -> list[str]:
     if not str(cfg.get("llama_bat_path") or "").strip():
         problems.append("config: llama_bat_path is empty - a llama-server that dies cannot be "
                         "started again (set it to the script that starts your server)")
+    unknown = sorted(k for k in cfg if k not in CONFIG_DEFAULTS)
+    if unknown:
+        problems.append("config: unknown key(s) ignored (typo?): %s" %
+                        ", ".join(unknown[:8]) +
+                        (" (+%d more)" % (len(unknown) - 8) if len(unknown) > 8 else ""))
     return problems
 
 
+STATE_VERSION = 1   # bumped when state.json needs a migration (see migrate_state)
+
+
 def load_state() -> dict:
-    return load_json(home_dir() / "state.json", {})
+    return migrate_state(load_json(home_dir() / "state.json", {}))
 
 
 def save_state(state: dict) -> None:
+    if isinstance(state, dict):
+        state["version"] = STATE_VERSION
     save_json(home_dir() / "state.json", state)
 
 
@@ -472,6 +511,34 @@ PER_STATE_DEFAULTS = {
     "progress_fp": "", "progress_cfp": "", "gave_up_mid": "",
     "err_mid": "", "err_kind": "",
 }
+
+def migrate_state(st) -> dict:
+    """Bring a loaded state.json up to STATE_VERSION. Idempotent.
+
+    - ensures `per` is a dict and every per-session entry carries the default
+      keys (so rules can read fields without a KeyError on a fresh/partial file);
+    - stamps `version`. Legacy v0 states kept single-session fields at the top
+      level; those are left untouched (the dashboard reads them for a config
+      with no `per` entry) and superseded by `per` once the engine writes it.
+    """
+    if not isinstance(st, dict):
+        st = {}
+    try:
+        v = int(st.get("version") or 0)
+    except (TypeError, ValueError):
+        v = 0
+    per = st.get("per")
+    if not isinstance(per, dict):
+        per = {}
+        st["per"] = per
+    for sid, entry in list(per.items()):
+        if not isinstance(entry, dict):
+            per[sid] = copy.deepcopy(PER_STATE_DEFAULTS)
+            continue
+        for k, dv in PER_STATE_DEFAULTS.items():
+            entry.setdefault(k, copy.deepcopy(dv))
+    st["version"] = max(v, STATE_VERSION)
+    return st
 
 
 def monitored_roots(cfg) -> list[str]:

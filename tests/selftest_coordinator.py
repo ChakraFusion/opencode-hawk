@@ -1494,6 +1494,56 @@ def _self_test_impl():
         print("%-24s expect=%-8s got=%-8s %s  %s" % (
             _name, "pass", "pass", "OK" if _ok else "MISMATCH", _name))
 
+    # CFG: upgrade merge + unknown-key warning + state schema migration.
+    _chome = Path(tempfile.mkdtemp())
+    _oc = os.environ.get("COORD_HOME")
+    try:
+        os.environ["COORD_HOME"] = str(_chome)
+        # deep-merge: a partial file gains scalar + unknown-to-file defaults,
+        # keeps user values, stamps version, and does NOT deep-merge notify.
+        (_chome / "config.json").write_text(json.dumps({
+            "project_dir": "C:/x", "session_id": "ses",
+            "notify": {"ntfy": {"topic": "hawk-1"}}}), encoding="utf-8")
+        cfg_m = load_config()
+        ok_cfg_m = (cfg_m["project_dir"] == "C:/x"
+                    and cfg_m.get("idle_minutes") == CONFIG_DEFAULTS["idle_minutes"]
+                    and cfg_m["notify"]["ntfy"]["topic"] == "hawk-1"
+                    and "kinds" not in cfg_m["notify"]["ntfy"]
+                    and cfg_m.get("version") == CONFIG_VERSION)
+        # unknown keys warn; known keys do not
+        _vc = dict(CONFIG_DEFAULTS); _vc["project_dir"] = "C:/x"
+        _p_known = validate_config(_vc)
+        _vc2 = dict(_vc); _vc2["llama_ap_port"] = 1   # typo of llama_api_port
+        _p_unknown = validate_config(_vc2)
+        ok_cfg_w = (not any("unknown key" in p for p in _p_known)
+                    and any("unknown key" in p and "llama_ap_port" in p
+                            for p in _p_unknown))
+        # state migration: version stamped, legacy top-level kept, per defaults filled
+        st_m = migrate_state({"prev_head": "abc", "continues": 2,
+                              "per": {"s1": {"prev_head": "p1"}, "s2": "junk"}})
+        ok_st = (st_m["version"] == STATE_VERSION
+                 and st_m["prev_head"] == "abc" and st_m["continues"] == 2
+                 and st_m["per"]["s1"]["prev_head"] == "p1"
+                 and st_m["per"]["s1"]["continues"] == 0
+                 and st_m["per"]["s1"]["last_evaluated_mid"] == ""
+                 and st_m["per"]["s2"] == PER_STATE_DEFAULTS
+                 and migrate_state(0)["version"] == STATE_VERSION)
+        # save_state stamps version; load_state migrates a legacy file
+        save_state({})
+        ok_st2 = load_state().get("version") == STATE_VERSION
+    finally:
+        if _oc is None:
+            os.environ.pop("COORD_HOME", None)
+        else:
+            os.environ["COORD_HOME"] = _oc
+        shutil.rmtree(_chome, ignore_errors=True)
+    for _name, _ok in (("config_upgrade_merge", ok_cfg_m),
+                       ("config_unknown_keys", ok_cfg_w),
+                       ("state_migration", ok_st and ok_st2)):
+        results.append((_name, "pass", "pass", _ok, _name, []))
+        print("%-24s expect=%-8s got=%-8s %s  %s" % (
+            _name, "pass", "pass", "OK" if _ok else "MISMATCH", _name))
+
     # AB: a non-git project dir converges after ONE priming pass (prev
     #     used to sit at "" and re-prime every pass, skipping evaluate).
     #     On the next pass, the completed turn at rest past idle reaches
