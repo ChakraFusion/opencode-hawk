@@ -189,7 +189,69 @@ def _close_quiet(fh) -> None:
         pass
 
 
-def log(msg: str) -> None:
+_LOG_LEVELS = {"debug": 10, "info": 20, "warn": 30, "warning": 30,
+               "error": 40, "critical": 50}
+
+
+def log_min_level() -> int:
+    """Numeric floor for the console/file trail. Default INFO; COORD_DEBUG (the
+    historical switch) forces DEBUG. HAWK_LOG_LEVEL=debug|info|warning|error
+    overrides both."""
+    raw = (os.environ.get("HAWK_LOG_LEVEL") or "").strip().lower()
+    if raw:
+        level = _LOG_LEVELS.get(raw)
+        if level is not None:
+            return level
+    if os.environ.get("COORD_DEBUG"):
+        return _LOG_LEVELS["debug"]
+    return _LOG_LEVELS["info"]
+
+
+def _log_max_bytes() -> int:
+    # Size cap for home_dir()/"monitor.log"; 0 disables rotation. One .1 backup
+    # is kept. Overridable with HAWK_LOG_MAX_BYTES for tests/ops.
+    raw = os.environ.get("HAWK_LOG_MAX_BYTES")
+    if raw is not None:
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            return 0
+    return 2_000_000
+
+
+def _rotate_log(key: str, fh):
+    # Rotate our own append handle once it exceeds the cap: close it, move the
+    # live file to <key>.1 (replacing any previous backup) and reopen a fresh
+    # one. Only the handle WE own is rotated -- when the canonical launcher made
+    # monitor.log its stdout, log() returns before reaching here, so the file
+    # backing that external handle is never renamed out from under it (which on
+    # Windows would fail anyway, the handle being open).
+    cap = _log_max_bytes()
+    if cap <= 0:
+        return fh
+    try:
+        if fh.tell() < cap:
+            return fh
+    except Exception:
+        return fh
+    _close_quiet(fh)
+    _LOG_FH_CACHE.pop(key, None)
+    try:
+        bak = key + ".1"
+        if os.path.exists(bak):
+            os.remove(bak)
+        os.replace(key, bak)
+    except Exception:
+        pass
+    try:
+        nf = open(key, "a", encoding="utf-8", buffering=1)
+        _LOG_FH_CACHE[key] = nf
+        return nf
+    except Exception:
+        return None
+
+
+def _emit(msg: str) -> None:
     # Two sinks, on purpose. The console print is the trail the launchers
     # (quickstart.bat, _launch_monitor.py) show the human; the append is the
     # trail that survives whatever the launcher pointed stdout at, and it is
@@ -242,6 +304,7 @@ def log(msg: str) -> None:
                 _close_quiet(old)
         fh.write(line + "\n")
         fh.flush()
+        _rotate_log(key, fh)
     except Exception:
         # The append must never raise and never mask the exception being handled:
         # log() is called from ~62 sites, ~25 of them inside except handlers, and a
@@ -254,9 +317,34 @@ def log(msg: str) -> None:
             _close_quiet(bad)
 
 
+def log(msg: str) -> None:
+    if log_min_level() <= _LOG_LEVELS["info"]:
+        _emit(msg)
+
+
+def log_warn(msg: str) -> None:
+    if log_min_level() <= _LOG_LEVELS["warn"]:
+        _emit("WARN " + msg)
+
+
+def log_error(msg: str) -> None:
+    if log_min_level() <= _LOG_LEVELS["error"]:
+        _emit("ERROR " + msg)
+
+
 def log_debug(msg: str) -> None:
-    if os.environ.get("COORD_DEBUG"):
-        log("DEBUG " + msg)
+    if log_min_level() <= _LOG_LEVELS["debug"]:
+        _emit("DEBUG " + msg)
+
+
+def log_decision(sid, action, reason, rule_hits) -> None:
+    """One structured, greppable line per action Hawk actually takes (skips the
+    ~90% of polls that decide "nothing"). Fields are stable so ops can
+    `grep 'decision '` and follow sid/action/reason/rules over time."""
+    if action in ("", "nothing", "skip"):
+        return
+    log("decision sid=%s action=%s reason=%r rules=%s" % (
+        sid, action, reason, "|".join(rule_hits or [])))
 
 
 # ── State / config ───────────────────────────────────────────────────────────
@@ -1521,6 +1609,7 @@ def apply_action(cfg, state, session, project_dir, parts, messages, action,
         if _an["v"] is None:
             _an["v"] = analyze(parts, messages)
         return _an["v"]
+    log_decision(session["id"], action, reason, rule_hits)
     if action in ("continue", "confirm_done", "done_rejected"):
         if not enable_continue:
             if node_sid:

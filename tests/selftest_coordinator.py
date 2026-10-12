@@ -1397,6 +1397,103 @@ def _self_test_impl():
         "OK" if ok_po else "MISMATCH",
         "poll_once follows the leaf and keys per-state by it"))
 
+    # LOG: levels + size-cap rotation + one structured decision line.
+    #   log_min_level() honours HAWK_LOG_LEVEL, falling back to COORD_DEBUG
+    #   (debug) then INFO; validation is by the numeric floor only.
+    _ol = os.environ.get("HAWK_LOG_LEVEL")
+    _od = os.environ.get("COORD_DEBUG")
+    try:
+        os.environ.pop("HAWK_LOG_LEVEL", None)
+        os.environ.pop("COORD_DEBUG", None)
+        _lvl0 = log_min_level() == 20
+        os.environ["HAWK_LOG_LEVEL"] = "WARN"
+        _lvl1 = log_min_level() == 30
+        os.environ["HAWK_LOG_LEVEL"] = "debug"
+        _lvl2 = log_min_level() == 10
+        os.environ.pop("HAWK_LOG_LEVEL", None)
+        os.environ["COORD_DEBUG"] = "1"
+        _lvl3 = log_min_level() == 10
+        os.environ["HAWK_LOG_LEVEL"] = "bogus"
+        _lvl4 = log_min_level() == 10          # invalid name -> COORD_DEBUG still applies
+    finally:
+        if _ol is None:
+            os.environ.pop("HAWK_LOG_LEVEL", None)
+        else:
+            os.environ["HAWK_LOG_LEVEL"] = _ol
+        if _od is None:
+            os.environ.pop("COORD_DEBUG", None)
+        else:
+            os.environ["COORD_DEBUG"] = _od
+    ok_lvlnum = all([_lvl0, _lvl1, _lvl2, _lvl3, _lvl4])
+
+    g_lg = log_warn.__globals__
+    o_emit = g_lg["_emit"]
+    got = []
+    try:
+        g_lg["_emit"] = lambda m: got.append(m)
+        os.environ.pop("HAWK_LOG_LEVEL", None)
+        os.environ.pop("COORD_DEBUG", None)
+        log_warn("w"); log_error("e"); log_debug("d"); log("i")
+        e_all = got == ["WARN w", "ERROR e", "i"]
+        got.clear()
+        os.environ["HAWK_LOG_LEVEL"] = "error"
+        log_warn("w2"); log_error("e2"); log("i2")
+        e_err = got == ["ERROR e2"]
+    finally:
+        g_lg["_emit"] = o_emit
+        if _ol is None:
+            os.environ.pop("HAWK_LOG_LEVEL", None)
+        else:
+            os.environ["HAWK_LOG_LEVEL"] = _ol
+    ok_lvlgate = e_all and e_err
+
+    # structured decision line: one greppable line per real action, silent on nothing
+    g_dec = log_decision.__globals__
+    o_log_dec = g_dec["log"]
+    dec = []
+    try:
+        g_dec["log"] = lambda m: dec.append(m)
+        log_decision("s1", "nothing", "r", [])
+        log_decision("s2", "continue", "idle>8", ["idle", "git"])
+        ok_dec = dec == ["decision sid=s2 action=continue reason='idle>8' rules=idle|git"]
+    finally:
+        g_dec["log"] = o_log_dec
+
+    # size-cap rotation: with a tiny cap the live file rolls to monitor.log.1
+    import io as _io
+    _rhome = Path(tempfile.mkdtemp())
+    _or = os.environ.get("COORD_HOME")
+    _om = os.environ.get("HAWK_LOG_MAX_BYTES")
+    _oldout = sys.stdout
+    try:
+        os.environ["COORD_HOME"] = str(_rhome)
+        os.environ["HAWK_LOG_MAX_BYTES"] = "300"
+        _LOG_FH_CACHE.clear()
+        sys.stdout = _io.StringIO()
+        for _i in range(40):
+            log("rotation filler %02d %s" % (_i, "x" * 100))
+        _live = _rhome / "monitor.log"
+        _bak = _rhome / "monitor.log.1"
+        ok_rot = _live.exists() and _bak.exists() and _live.stat().st_size < 900
+    finally:
+        sys.stdout = _oldout
+        _LOG_FH_CACHE.clear()
+        if _or is None:
+            os.environ.pop("COORD_HOME", None)
+        else:
+            os.environ["COORD_HOME"] = _or
+        if _om is None:
+            os.environ.pop("HAWK_LOG_MAX_BYTES", None)
+        else:
+            os.environ["HAWK_LOG_MAX_BYTES"] = _om
+        shutil.rmtree(_rhome, ignore_errors=True)
+
+    for _name, _ok in (("log_levels", ok_lvlnum and ok_lvlgate), ("log_decision", ok_dec),
+                       ("log_rotation", ok_rot)):
+        results.append((_name, "pass", "pass", _ok, _name, []))
+        print("%-24s expect=%-8s got=%-8s %s  %s" % (
+            _name, "pass", "pass", "OK" if _ok else "MISMATCH", _name))
+
     # AB: a non-git project dir converges after ONE priming pass (prev
     #     used to sit at "" and re-prime every pass, skipping evaluate).
     #     On the next pass, the completed turn at rest past idle reaches
