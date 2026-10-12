@@ -932,7 +932,7 @@ def self_test():
     pushes6 = []
 
     def rec_post6(c, title, body, tags="", actions=None, kind="alert",
-                  eid="", meta=None):
+                 eid="", meta=None, attach=""):
         pushes6.append({"title": title, "body": body, "kind": kind, "eid": eid})
         return True
 
@@ -991,7 +991,7 @@ def self_test():
     pushes8 = []
 
     def rec_post8(c, title, body, tags="", actions=None, kind="alert",
-                  eid="", meta=None):
+                 eid="", meta=None, attach=""):
         pushes8.append({"title": title, "body": body, "kind": kind, "eid": eid})
         return True
 

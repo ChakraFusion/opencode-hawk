@@ -1,9 +1,10 @@
 """Self-test for the unified ntfy event pipeline.
 
 Covers: kinds_enabled fallback, record_event gate ordering (topic -> eid
-dedupe -> kinds gate -> cooldown), watermarks, resolve_pending_route, and
-every reply-routing branch in poll_ntfy_replies (awaiting, digit-resolves-
-prompt, supersede, single-candidate echo, unrouted, multi-candidate prompt).
+dedupe -> kinds gate -> cooldown), watermarks, resolve_pending_route, every
+reply-routing branch in poll_ntfy_replies (single awaiting, digit-resolves-
+prompt, supersede, single-candidate echo, unrouted, multi-candidate prompt,
+multi-awaiting prompt), and screenshot discovery/upload/attachment.
 
 Hermetic: monkey-patches the home dir, config loader, ntfy HTTP layer,
 urlopen, and the reply queue so the real home state, config.json, ntfy
@@ -12,6 +13,7 @@ service, and live sessions are never touched.
 Run:  python tests/selftest_notify.py     (exit 0 = all pass)
 """
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -83,13 +85,13 @@ def install(cfg):
     pushes = []
 
     def rec_post(c, title, body, tags="", actions=None, kind="alert",
-                 eid="", meta=None):
+                 eid="", meta=None, attach=""):
         pushes.append({"title": title, "body": body, "kind": kind,
-                       "eid": eid, "tags": tags})
+                       "eid": eid, "tags": tags, "attach": attach})
         # Delegate to the real _post_ntfy (urlopen is stubbed) so the
         # log-append / self-id bookkeeping inside it actually runs.
         return orig_post(c, title, body, tags=tags, actions=actions,
-                         kind=kind, eid=eid, meta=meta)
+                         kind=kind, eid=eid, meta=meta, attach=attach)
 
     notify._post_ntfy = rec_post
     orig_qr = notify.queue_reply
@@ -412,7 +414,8 @@ def test_poll_branches():
               == ["s1", "s2"]
           and any(x["kind"] == "routing"
                   and x["title"] == "[hawk] reply routing"
-                  and "1. s1" in x["body"] and "2. s2" in x["body"]
+                  and "1. p1 [s1]" in x["body"]
+                  and "2. p2 [s2]" in x["body"]
                   for x in pushes))
 
     # 6g seen ids skipped
@@ -463,17 +466,29 @@ def test_poll_branches():
           and lg and lg[-1]["kind"] == "reply"
           and lg[-1]["session"] == "sNew"[-8:])
 
-    # 6k with several valid awaiting sessions the newest escalation wins --
-    # the user answers the latest message pushed, not the oldest one.
-    d, lg, _, _ = run_once(
+    # 6k with several valid awaiting sessions the reply is ambiguous: ntfy
+    # must ask which session instead of silently picking one, and the awaiting
+    # FIFO is cleared because the pending prompt now owns the choice.
+    amap = {}
+    d, lg, pushes, pend = run_once(
         ndjson([msg("m1", "hello")]),
         cfg={"monitored_sessions":
              {"s1": {"enabled": True, "project_dir": "/p1"},
               "s2": {"enabled": True, "project_dir": "/p2"}}},
-        seed_map={"_ntfy_awaiting": ["s1", "s2"]})
-    check("poll: newest awaiting escalation wins",
-          d == 1 and applied == [("s2", "hello")]
-          and lg and lg[-1]["session"] == "s2"[-8:])
+        seed_map={"_ntfy_awaiting": ["s1", "s2"]}, out_map=amap)
+    check("poll: multiple awaiting -> numbered prompt, awaiting cleared",
+          d == 0 and applied == []
+          and [c.get("sid") for c in pend.get("candidates") or []]
+              == ["s1", "s2"]
+          and amap.get("_ntfy_awaiting") == []
+          and any(x["kind"] == "routing" and "1. p1 [s1]" in x["body"]
+                  and "2. p2 [s2]" in x["body"] for x in pushes))
+
+    # 6k-bis the prompt 6k saved resolves with a digit on the next reply.
+    d, lg, _, pend = run_once(ndjson([msg("m2", "2")]), pending=dict(pend))
+    check("poll: awaited-prompt digit routes original text",
+          d == 1 and applied == [("s2", "hello")] and pend == {}
+          and lg and lg[-1].get("note") == "routed via prompt #2")
 
     # 6l apply_reply returning False is a failed delivery, not a success:
     # the session is re-queued (newest) and the reply is not logged as sent.
@@ -489,6 +504,109 @@ def test_poll_branches():
           d == 0 and applied == [("sidAAA", "hello")]
           and final_map.get("_ntfy_awaiting") == ["sidAAA"]
           and not [e for e in lg if e["kind"] == "reply"])
+
+
+def test_screenshots():
+    # _screenshot_cfg: defaults on, 30 min, known dirs; explicit off respected.
+    sc = notify._screenshot_cfg({"notify": {"ntfy": {"topic": "t"}}})
+    check("shots: defaults (on, 30min, known dirs, 2MB)",
+          sc["enabled"] is True and sc["max_age_s"] == 1800
+          and ".playwright-mcp" in sc["dirs"] and sc["max_bytes"] == 2_000_000)
+    check("shots: attach_screenshots=false respected",
+          notify._screenshot_cfg(
+              {"notify": {"ntfy": {"attach_screenshots": False}}})["enabled"]
+          is False)
+
+    root = Path(tempfile.mkdtemp(prefix="shots-"))
+    try:
+        (root / "new.png").write_bytes(b"x" * 32)
+        stale = root / "stale.png"
+        stale.write_bytes(b"x" * 32)
+        os.utime(stale, (0, 0))           # epoch -> outside the age window
+        (root / "note.txt").write_bytes(b"x" * 32)
+        big = root / "big.png"
+        big.write_bytes(b"x" * 5000)
+        sub = root / ".playwright-mcp"
+        sub.mkdir()
+        (sub / "shot.webp").write_bytes(b"x" * 32)
+        (sub / "p5-1.jpg").write_bytes(b"x" * 32)
+
+        shots = notify.find_recent_screenshots(
+            str(root), max_age_s=1800, dirs=[".playwright-mcp"])
+        names = {p.name for p in shots}
+        check("shots: recent images found (root + known dir), old/junk skipped",
+              names == {"new.png", "big.png", "shot.webp", "p5-1.jpg"}
+              and "stale.png" not in names and "note.txt" not in names
+              and all(p.suffix.lower() in notify.SCREENSHOT_EXTS
+                      for p in shots))
+
+        shots2 = notify.find_recent_screenshots(
+            str(root), max_age_s=1800, dirs=[".playwright-mcp"], max_bytes=1000)
+        check("shots: oversize images skipped",
+              all(p.name != "big.png" for p in shots2))
+
+        check("shots: missing/empty project_dir -> []",
+              notify.find_recent_screenshots("") == []
+              and notify.find_recent_screenshots(str(root / "nope")) == [])
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_attach_upload():
+    cfg = {"notify": {"ntfy": {"topic": "t", "server": "https://ntfy.sh"}}}
+    restore, pushes, _ = install(cfg)
+    root = Path(tempfile.mkdtemp(prefix="att-"))
+    try:
+        img = root / "shot.png"
+        img.write_bytes(b"PNGDATA")
+        cap = {}
+
+        def fake(req, timeout=None):
+            cap["method"] = req.get_method()
+            cap["url"] = req.full_url
+            cap["filename"] = req.get_header("Filename")
+            cap["data"] = req.data
+            if req.get_method() == "PUT":
+                return FakeResp(json.dumps(
+                    {"attachment": {"url": "https://ntfy.sh/att/abc"}}))
+            return FakeResp(json.dumps({"id": "z1"}))
+
+        urllib.request.urlopen = fake
+        url = notify.upload_attachment(cfg, img)
+        check("attach: PUT upload returns the served attachment url",
+              url == "https://ntfy.sh/att/abc"
+              and cap["method"] == "PUT" and cap["filename"] == "shot.png"
+              and cap["url"] == "https://ntfy.sh/t")
+
+        cap.clear()
+        ok = notify._post_ntfy(cfg, "[hawk] t", "body", kind="routing",
+                               attach=url)
+        payload = json.loads(cap["data"].decode("utf-8"))
+        check("attach: _post_ntfy carries the url in the JSON publish",
+              ok and payload.get("attach") == "https://ntfy.sh/att/abc")
+
+        urllib.request.urlopen = lambda req, timeout=None: FakeResp(b"nope")
+        check("attach: unparseable upload -> '' (text-only push)",
+              notify.upload_attachment(cfg, img) == "")
+
+        # Escalation end-to-end: find -> upload -> record_event(attach).
+        orig_find = notify.find_recent_screenshots
+        orig_up = notify.upload_attachment
+        notify.find_recent_screenshots = lambda *a, **k: [Path("shot.png")]
+        notify.upload_attachment = lambda c, p: "https://ntfy.sh/att/e.png"
+        try:
+            sent = notify.notify_escalation(
+                cfg, {"id": "sidX", "title": "T"}, "why", [],
+                {"last_assistant": ""}, "/rep", project_dir="/proj")
+        finally:
+            notify.find_recent_screenshots = orig_find
+            notify.upload_attachment = orig_up
+        check("attach: escalation push carries the screenshot url",
+              sent and any(x.get("attach") == "https://ntfy.sh/att/e.png"
+                           for x in pushes))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+        restore()
 
 
 def test_escalation_awaiting_prune():
@@ -765,6 +883,8 @@ def main():
     test_watermarks()
     test_resolve_pending()
     test_poll_branches()
+    test_screenshots()
+    test_attach_upload()
     test_escalation_awaiting_prune()
     test_remove_log_entries()
     test_log_write_failure_is_contained()

@@ -5,12 +5,16 @@ Stdlib-only (urllib + uuid + json). Channel:
 - ntfy: notify.ntfy.topic -> push to https://ntfy.sh/<topic> as plain text
   (no action buttons). The user replies by sending a message in the ntfy app
   on the same topic; the monitor polls the topic's JSON stream endpoint
-  (poll=1&since=<cursor>) and routes each user reply:
-    1. an escalation-registered awaiting session (explicit 1:1, as before)
-    2. an active numbered routing prompt (digit reply resolves it)
-    3. a single enabled monitored session (free messages echo into it)
-    4. otherwise: a numbered ntfy prompt is pushed and the reply waits in
-       pending_ntfy_routes.json (one at a time; superseded by newer messages)
+  - a reply targets the sessions awaiting an answer (the escalations the user
+    has seen); with none it targets every enabled monitored session
+    (free message). Exactly one target is delivered 1:1; several targets push
+    a numbered routing prompt and the reply waits in pending_ntfy_routes.json
+    (a digit resolves it; a newer message supersedes it), so concurrent
+    sessions never silently steal each other's replies.
+  Escalations can also carry a screenshot the workflow produced: with
+  notify.ntfy.attach_screenshots (default on) the newest recent image in the
+  session's project dir (root, .playwright-mcp/, docs/screenshots/,
+  screenshots/, .opencode/tmp/) is uploaded and attached to the push.
   Self-published message IDs are tracked so the coordinator never treats its
   own notifications as replies.
 
@@ -28,6 +32,7 @@ import urllib.error
 import urllib.request
 import threading
 import uuid
+from pathlib import Path
 from urllib.parse import quote
 
 from .coordinator import log, log_debug, load_config, extract_choices
@@ -56,6 +61,12 @@ DEFAULT_NOTIFY_KINDS = ["escalation", "plan_done", "test"]
 # Chatty kinds get a minimum gap between phone pushes (seconds); others push
 # immediately. Overridable via notify.ntfy.kind_cooldown_s.
 DEFAULT_KIND_COOLDOWNS_S = {"commit": 60, "continue": 60, "nudge": 60}
+# Where a workflow tends to drop screenshots on its own, relative to the
+# session's project_dir (scanned in addition to the project root itself). Any
+# relative path is accepted via notify.ntfy.screenshot_dirs.
+DEFAULT_SCREENSHOT_DIRS = [".playwright-mcp", "docs/screenshots",
+                           "screenshots", ".opencode/tmp"]
+SCREENSHOT_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 KIND_TAGS = {
     "commit": "arrow_right", "milestone": "tada", "escalation": "sos",
     "plan_done": "white_check_mark", "continue": "repeat", "nudge": "bell",
@@ -262,7 +273,7 @@ def set_watermark(project_dir: str, kind: str, value) -> None:
 
 
 def record_event(cfg, kind: str, title: str, body: str, eid: str = "",
-                 meta: dict = None) -> bool:
+                 meta: dict = None, attach: str = "") -> bool:
     """Unified phone-push entry point for every event kind.
 
     Applies, in order: topic configured, eid dedupe, kinds_enabled gate,
@@ -289,7 +300,7 @@ def record_event(cfg, kind: str, title: str, body: str, eid: str = "",
         tags = "warning:" + tags   # errored subagent -> warning badge (2026-09-23)
     sent = _post_ntfy(cfg, title, body,
                       tags=tags, actions=None,
-                      kind=kind, eid=eid, meta=meta)
+                      kind=kind, eid=eid, meta=meta, attach=attach)
     if sent:
         now = int(_time.time())
         st.setdefault("last_push_ts", {})[kind] = now
@@ -337,7 +348,7 @@ def _urlopen_retry_429(req, label: str, waits=None, timeout: int = 15):
 
 def _post_ntfy(cfg, title: str, body: str, tags: str = "",
                 actions=None, kind: str = "alert", eid: str = "",
-                meta: dict = None) -> bool:
+                meta: dict = None, attach: str = "") -> bool:
     n = _ntfy_cfg(cfg)
     if not n["topic"]:
         return False
@@ -349,6 +360,8 @@ def _post_ntfy(cfg, title: str, body: str, tags: str = "",
         payload["tags"] = [t for t in tags.split(",") if t]
     if actions:
         payload["actions"] = actions
+    if attach:
+        payload["attach"] = attach
     req = urllib.request.Request(
         n["server"] + "/",
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -378,6 +391,8 @@ def _post_ntfy(cfg, title: str, body: str, tags: str = "",
                 "id": msg_id or ("dlt-" + uuid.uuid4().hex[:12])}
             if eid:
                 entry["eid"] = eid
+            if attach:
+                entry["attach"] = attach
             if meta:
                 for k, v in meta.items():
                     if v not in (None, ""):
@@ -389,6 +404,115 @@ def _post_ntfy(cfg, title: str, body: str, tags: str = "",
     except Exception as e:
         log("notify: ntfy send failed: %s" % e)
         return False
+
+
+def _screenshot_cfg(cfg) -> dict:
+    """Screenshot-attachment settings under notify.ntfy (read-time defaults, so
+    the key may be absent from config.json entirely)."""
+    n = (cfg.get("notify") or {}).get("ntfy") or {}
+    dirs = n.get("screenshot_dirs")
+    return {
+        "enabled": bool(n.get("attach_screenshots", True)),
+        "max_age_s": int(n.get("screenshot_max_age_s") or 1800),
+        "max_bytes": int(n.get("screenshot_max_bytes") or 2_000_000),
+        "dirs": ([str(d) for d in dirs] if isinstance(dirs, list)
+                 else list(DEFAULT_SCREENSHOT_DIRS)),
+    }
+
+
+def find_recent_screenshots(project_dir, max_age_s: int = 1800,
+                            dirs=None, max_bytes: int = 0) -> list:
+    """Image files a workflow left behind, newest first (best-effort, no raise).
+
+    Scans the project root plus the usual output dirs (non-recursive, so a huge
+    tree is never walked) and keeps images modified within max_age_s and, when
+    max_bytes > 0, under that size. Missing/empty project_dir yields [].
+    """
+    out = []
+    if not str(project_dir or "").strip():
+        return out
+    try:
+        root = Path(str(project_dir)).expanduser()
+        if not root.is_dir():
+            return out
+        cutoff = _time.time() - max(0, int(max_age_s))
+        seen = set()
+        for base in [root] + [root / d for d in (dirs or [])]:
+            try:
+                if not base.is_dir():
+                    continue
+                for p in base.iterdir():
+                    if not p.is_file() or p.suffix.lower() not in SCREENSHOT_EXTS:
+                        continue
+                    rp = str(p.resolve())
+                    if rp in seen:
+                        continue
+                    seen.add(rp)
+                    st = p.stat()
+                    if st.st_size == 0 or st.st_mtime < cutoff:
+                        continue
+                    if max_bytes and st.st_size > max_bytes:
+                        continue
+                    out.append((st.st_mtime, p))
+            except OSError as e:
+                log_debug("notify: screenshot scan skipped %s: %s" % (base, e))
+    except OSError as e:
+        log_debug("notify: screenshot scan failed: %s" % e)
+    out.sort(key=lambda t: t[0], reverse=True)
+    return [p for _, p in out]
+
+
+def upload_attachment(cfg, path) -> str:
+    """Upload a local file to the ntfy topic and return its served URL.
+
+    ntfy's JSON publish can only *reference* an attachment by URL, so a local
+    screenshot must be PUT to the topic first; the publish then carries the
+    returned url. Returns "" (and logs) when the file is unreadable or the
+    server rejects the upload -- e.g. self-hosted ntfy without attachment
+    support -- so the push still goes out as plain text.
+    """
+    n = _ntfy_cfg(cfg)
+    if not n["topic"]:
+        return ""
+    path = Path(path)
+    try:
+        data = path.read_bytes()
+    except OSError as e:
+        log_debug("notify: unreadable attachment %s: %s" % (path, e))
+        return ""
+    req = urllib.request.Request(
+        "%s/%s" % (n["server"], n["topic"]), data=data, method="PUT",
+        headers={"Filename": path.name,
+                 "Content-Type": "application/octet-stream"})
+    try:
+        with _urlopen_retry_429(req, "upload %s" % path.name[:30],
+                                timeout=30) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            info = json.loads(raw)
+            return str((info.get("attachment") or {}).get("url") or "")
+    except Exception as e:
+        log("notify: attachment upload failed (%s): %s" % (path.name, e))
+        return ""
+
+
+def _screenshot_attach(cfg, project_dir) -> str:
+    """Best-effort: upload the newest recent workflow screenshot for
+    project_dir and return its ntfy URL ("" when disabled/none/failed)."""
+    sc = _screenshot_cfg(cfg)
+    if not sc["enabled"] or not str(project_dir or "").strip():
+        return ""
+    try:
+        shots = find_recent_screenshots(project_dir, sc["max_age_s"],
+                                        sc["dirs"], sc["max_bytes"])
+        if not shots:
+            return ""
+        url = upload_attachment(cfg, shots[0])
+        if url:
+            log("notify: attached screenshot %s" % shots[0].name)
+        return url
+    except Exception as e:
+        log_debug("notify: screenshot attach failed: %s" % e)
+        return ""
 
 
 def delete_message(cfg, msg_id: str) -> bool:
@@ -660,10 +784,11 @@ def _track_self_id(msg_id: str) -> None:
 
 
 def notify_escalation(cfg, session, reason, rule_hits, analysis, es_path,
-                      kind: str = "escalation") -> bool:
+                      kind: str = "escalation", project_dir: str = "") -> bool:
     """Send an escalation/question alert to the configured ntfy topic.
 
-    Returns True if the alert was pushed.
+    When the workflow produced a screenshot (project_dir + recent image), it is
+    attached so the user sees what the agent sees. Returns True if pushed.
     """
     ntfy_topic = _ntfy_cfg(cfg)["topic"]
     if not ntfy_topic:
@@ -688,15 +813,23 @@ def notify_escalation(cfg, session, reason, rule_hits, analysis, es_path,
     if len(last) > 60:
         plain += "\nLast message:\n%s" % last[:2500]
 
+    # A screenshot the workflow took on its own makes the alert actionable
+    # without opening the dashboard; attachment is best-effort.
+    attach = _screenshot_attach(cfg, project_dir)
+    if attach:
+        plain += "Screenshot: attached\n"
+
     # ntfy: plain text notification (no action buttons). The user replies by
     # sending a message in the ntfy app on this topic; the monitor polls the
-    # JSON stream and routes replies 1:1 into the originating session.
+    # JSON stream and routes the reply into this session (asking which one when
+    # several are active).
     reply_hint = ("\n\nReply in the ntfy app on this topic; "
-                  "your reply is written 1:1 into the session.")
+                  "your reply is written into this session (if several are "
+                  "active you'll be asked which one).")
     sent = record_event(
         cfg, kind, "%s: %s" % (kind, title[:60] or sid[-8:]),
         plain + reply_hint, eid="esc-%s-%d" % (sid, int(_time.time() * 1000)),
-        meta={"session": str(sid)[-8:], "title": title[:60]})
+        meta={"session": str(sid)[-8:], "title": title[:60]}, attach=attach)
     if sent:
         # Register this session so the next user reply is routed to it.
         # Drop stale registrations first: a session disabled since its own
@@ -715,11 +848,13 @@ def notify_escalation(cfg, session, reason, rule_hits, analysis, es_path,
 
 
 def send_text(cfg, text: str, kind: str = "plan_done",
-              eid: str = "", meta: dict = None) -> bool:
-    """Plain alert to the ntfy topic (used for build-plan done)."""
+              eid: str = "", meta: dict = None, project_dir: str = "") -> bool:
+    """Plain alert to the ntfy topic (used for build-plan done). Attaches the
+    newest recent project screenshot when one exists and the config allows."""
     return record_event(cfg, kind,
                         text.splitlines()[0] if text else "alert",
-                        text, eid=eid, meta=meta)
+                        text, eid=eid, meta=meta,
+                        attach=_screenshot_attach(cfg, project_dir))
 
 
 def queue_reply(session_id: str, choice: str) -> bool:
@@ -827,6 +962,52 @@ def _active_session_cands(cfg) -> list:
     return out
 
 
+def _candidate_label(cfg, sid) -> str:
+    """Human label for a routing candidate: the config title, else the project
+    folder name, else "session" (the sid suffix is always shown alongside)."""
+    mon = cfg.get("monitored_sessions") or {}
+    entry = mon.get(sid) if isinstance(mon, dict) else None
+    entry = entry if isinstance(entry, dict) else {}
+    title = str(entry.get("title") or "").strip()
+    if title:
+        return title
+    pd = str(entry.get("project_dir") or "").replace("\\", "/").rstrip("/")
+    base = pd.rsplit("/", 1)[-1] if pd else ""
+    return base or "session"
+
+
+def _routing_cands(cfg, awaiting) -> list:
+    """Reply-target candidates, most specific first.
+
+    The sessions awaiting an answer (the escalations the user has actually
+    seen) come first; with none, every enabled monitored session. Each is
+    {sid, project_dir, label, awaiting}. Several candidates make a reply
+    ambiguous, so the caller asks instead of guessing."""
+    mon = cfg.get("monitored_sessions") or {}
+    if not isinstance(mon, dict):
+        mon = {}
+    out = []
+    seen = set()
+    for sid in awaiting:
+        sid = str(sid)
+        if sid in seen:
+            continue
+        seen.add(sid)
+        entry = mon.get(sid) if isinstance(mon.get(sid), dict) else {}
+        out.append({"sid": sid,
+                    "project_dir": str(entry.get("project_dir") or ""),
+                    "label": _candidate_label(cfg, sid),
+                    "awaiting": True})
+    if out:
+        return out
+    for c in _active_session_cands(cfg):
+        c = dict(c)
+        c["label"] = _candidate_label(cfg, c["sid"])
+        c["awaiting"] = False
+        out.append(c)
+    return out
+
+
 def _live_awaiting(cfg, awaiting):
     """Keep awaiting entries a reply may still legitimately reach.
 
@@ -848,13 +1029,15 @@ def _live_awaiting(cfg, awaiting):
 
 
 def poll_ntfy_replies(apply_reply) -> int:
-    """Poll the ntfy JSON stream for user replies and route them 1:1 into
-    the originating session via apply_reply(session_id, text).
+    """Poll the ntfy JSON stream for user replies and route them into the
+    target session via apply_reply(session_id, text).
 
-    Uses poll=1 (cached messages, close connection) with since=<cursor> for
-    incremental polling.  Self-published message IDs are tracked in the
-    reply map so the coordinator never treats its own notifications as
-    replies.  Returns how many replies were delivered.
+    Targets are the awaiting escalations first, else every enabled monitored
+    session; a single target is delivered directly, several push a numbered
+    routing prompt. Uses poll=1 (cached messages, close connection) with
+    since=<cursor> for incremental polling.  Self-published message IDs are
+    tracked in the reply map so the coordinator never treats its own
+    notifications as replies.  Returns how many replies were delivered.
     """
     cfg = load_config()
     n = _ntfy_cfg(cfg)
@@ -938,11 +1121,52 @@ def poll_ntfy_replies(apply_reply) -> int:
         seen.add(mid)
         body = str(body).strip()
 
-        # 1) Escalations register an explicit awaiting session; that reply
-        #    wins over everything else (pre-unification behavior). The newest
-        #    registration wins: the user answers the latest message pushed.
-        if awaiting:
-            sid = awaiting.pop()
+        # 1) A pending numbered routing prompt is answered first: a digit in
+        #    range resolves it (the original text is delivered to the chosen
+        #    session). Awaiting registrations already name their target, so the
+        #    prompt is only consulted for a reply that has no awaiting target.
+        if not awaiting:
+            p = load_pending_route()
+            if p:
+                pcands = [c for c in (p.get("candidates") or [])
+                          if isinstance(c, dict)]
+                if body.isdigit() and 1 <= int(body) <= len(pcands):
+                    sid = str(pcands[int(body) - 1].get("sid") or "")
+                    orig = str(p.get("text") or "")
+                    if sid and load_pending_route().get("ts") == p.get("ts"):
+                        try:
+                            apply_reply(sid, orig)
+                            delivered += 1
+                            clear_pending_route()
+                            append_notify_log({
+                                "ts": int(_time.time() * 1000),
+                                "dir": "received", "kind": "reply",
+                                "channel": "ntfy",
+                                "session": str(sid)[-8:],
+                                "text": orig[:120],
+                                "note": "routed via prompt #%d"
+                                        % int(body)})
+                        except Exception as e:
+                            log("notify: ntfy reply apply failed: %s" % e)
+                            # leave the prompt in place for the next tick
+                        continue
+                # Anything else supersedes the old prompt (A3): the incoming
+                # message becomes the payload of the fresh decision below.
+                append_notify_log({
+                    "ts": int(_time.time() * 1000), "dir": "received",
+                    "kind": "reply_expired", "channel": "ntfy",
+                    "text": str(p.get("text") or "")[:120]})
+                clear_pending_route()
+
+        # 2) Reply targets: the sessions awaiting an answer (the escalations
+        #    the user has seen) first, else every enabled monitored session.
+        #    Exactly one target is unambiguous; with several, the user must
+        #    choose, so concurrent sessions never silently steal a reply.
+        cands = _routing_cands(cfg, awaiting)
+        if len(cands) == 1:
+            sid = cands[0]["sid"]
+            if sid in awaiting:
+                awaiting.remove(sid)      # the escalation was just answered
             try:
                 if apply_reply(sid, body) is False:
                     raise RuntimeError("apply_reply returned False")
@@ -953,71 +1177,32 @@ def poll_ntfy_replies(apply_reply) -> int:
                     "session": str(sid)[-8:], "text": body[:120]})
             except Exception as e:
                 log("notify: ntfy reply apply failed: %s" % e)
-                # Put the session back at the end (newest) for retry
-                awaiting.append(sid)
+                if sid not in awaiting:
+                    awaiting.append(sid)   # retry on the next tick
             continue
 
-        # 2) Active numbered routing prompt: a digit in range resolves it.
-        p = load_pending_route()
-        if p:
-            pcands = [c for c in (p.get("candidates") or [])
-                      if isinstance(c, dict)]
-            if body.isdigit() and 1 <= int(body) <= len(pcands):
-                sid = str(pcands[int(body) - 1].get("sid") or "")
-                orig = str(p.get("text") or "")
-                if sid and load_pending_route().get("ts") == p.get("ts"):
-                    try:
-                        apply_reply(sid, orig)
-                        delivered += 1
-                        clear_pending_route()
-                        append_notify_log({
-                            "ts": int(_time.time() * 1000),
-                            "dir": "received", "kind": "reply",
-                            "channel": "ntfy",
-                            "session": str(sid)[-8:],
-                            "text": orig[:120],
-                            "note": "routed via prompt #%d"
-                                    % int(body)})
-                    except Exception as e:
-                        log("notify: ntfy reply apply failed: %s" % e)
-                        # leave the prompt in place for the next tick
-                    continue
-            # Anything else supersedes the old prompt (A3): the incoming
-            # message becomes the payload of the fresh prompt below.
-            append_notify_log({
-                "ts": int(_time.time() * 1000), "dir": "received",
-                "kind": "reply_expired", "channel": "ntfy",
-                "text": str(p.get("text") or "")[:120]})
-            clear_pending_route()
-
-        # 3) Free message: echo it into a running session.
-        cands = _active_session_cands(cfg)
-        if len(cands) == 1:
-            sid = cands[0]["sid"]
-            try:
-                apply_reply(sid, body)
-                delivered += 1
-                append_notify_log({
-                    "ts": int(_time.time() * 1000), "dir": "received",
-                    "kind": "reply", "channel": "ntfy",
-                    "session": str(sid)[-8:], "text": body[:120]})
-            except Exception as e:
-                log("notify: ntfy reply apply failed: %s" % e)
-        elif not cands:
+        # 3) Nothing to route into.
+        if not cands:
             append_notify_log({
                 "ts": int(_time.time() * 1000), "dir": "received",
                 "kind": "reply_unrouted", "channel": "ntfy",
                 "text": body[:120]})
-        else:
-            rec = {"ts": int(_time.time() * 1000), "text": body,
-                   "candidates": cands}
-            save_pending_route(rec)
-            prompt = ("Reply routing — send the number of the target "
-                      "session:\n")
-            for i, c in enumerate(cands, 1):
-                prompt += "%d. %s\n" % (i, str(c.get("sid") or "")[-8:])
-            _post_ntfy(cfg, "[hawk] reply routing", prompt,
-                       tags="chat", kind="routing")
+            continue
+
+        # 4) Several targets: ask. The prompt now owns the choice, so the
+        #    awaiting FIFO is cleared -- a later reply resolves via the prompt
+        #    instead of re-prompting from a stale registration.
+        rec = {"ts": int(_time.time() * 1000), "text": body,
+               "candidates": cands}
+        save_pending_route(rec)
+        awaiting = []
+        prompt = ("Reply routing — %d sessions could receive this. "
+                  "Send the number of the target:\n" % len(cands))
+        for i, c in enumerate(cands, 1):
+            prompt += "%d. %s [%s]\n" % (i, c.get("label") or "session",
+                                         str(c.get("sid") or "")[-8:])
+        _post_ntfy(cfg, "[hawk] reply routing", prompt,
+                   tags="chat", kind="routing")
 
     m["_ntfy_cursor"] = new_cursor
     m["_ntfy_awaiting"] = awaiting

@@ -27,7 +27,11 @@
       "topic": "",
       "priority": 3,
       "kinds": ["escalation", "plan_done", "test"],
-      "callback_base": "http://127.0.0.1:8765"
+      "callback_base": "http://127.0.0.1:8765",
+      "attach_screenshots": true,
+      "screenshot_max_age_s": 1800,
+      "screenshot_max_bytes": 2000000,
+      "screenshot_dirs": [".playwright-mcp", "docs/screenshots", "screenshots", ".opencode/tmp"]
     }
   }
 }

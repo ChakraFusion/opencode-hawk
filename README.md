@@ -170,6 +170,10 @@ from the dashboard.
 | `notify.ntfy.topic` | generated | Your private ntfy topic |
 | `notify.ntfy.server` | `https://ntfy.sh` | ntfy server (self-hosted works too) |
 | `notify.ntfy.kinds` | `escalation, plan_done, test` | Which events are pushed to the phone |
+| `notify.ntfy.attach_screenshots` | `true` | Attach the newest recent screenshot a workflow produced to its escalation/plan_done push (self-hosted ntfy without attachment support falls back to text) |
+| `notify.ntfy.screenshot_max_age_s` | `1800` | Only attach images modified within this many seconds |
+| `notify.ntfy.screenshot_max_bytes` | `2000000` | Skip images larger than this |
+| `notify.ntfy.screenshot_dirs` | `.playwright-mcp, docs/screenshots, screenshots, .opencode/tmp` | Extra folders under the session project dir to scan for screenshots |
 
 Where `config.json`, state and logs live (`hawk where` prints it): `COORD_HOME`
 when set; in a source checkout the repository folder; otherwise

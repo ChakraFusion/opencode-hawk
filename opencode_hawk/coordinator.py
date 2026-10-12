@@ -1849,7 +1849,8 @@ def _act_continue(ctx: "ActionCtx") -> int:
                     log("give_up: session note failed: %s" % _ne)
             try:
                 from . import notify
-                notify.notify_escalation(cfg, session, reason_g, ctx.rule_hits, a, str(path))
+                notify.notify_escalation(cfg, session, reason_g, ctx.rule_hits, a,
+                                         str(path), project_dir=ctx.project_dir)
             except Exception as _ne:
                 log("give_up: notification failed: %s" % _ne)
             return 2
@@ -1876,7 +1877,8 @@ def _act_continue(ctx: "ActionCtx") -> int:
                 from . import notify
                 notify.notify_escalation(cfg, session,
                                          ctx.reason or "self-check delivery failed (CLI unavailable); will retry",
-                                         ctx.rule_hits, a, str(path))
+                                         ctx.rule_hits, a, str(path),
+                                         project_dir=ctx.project_dir)
             except Exception as e:
                 log_debug("notify: escalation (self-check delivery failed) failed: %s" % e)
         else:
@@ -1910,7 +1912,7 @@ def _act_continue(ctx: "ActionCtx") -> int:
             from . import notify
             a = ctx.analysis()
             notify.notify_escalation(cfg, session, ctx.reason, ctx.rule_hits, a, "",
-                                     kind="confirm_done")
+                                     kind="confirm_done", project_dir=ctx.project_dir)
         except Exception as e:
             log_debug("notify: escalation (confirm_done) failed: %s" % e)
     elif ctx.action == "done_rejected":
@@ -2002,7 +2004,8 @@ def _act_error(ctx: "ActionCtx") -> int:
             log("error stop: session note failed: %s" % _ne)
     try:
         from . import notify
-        notify.notify_escalation(cfg, session, reason2, ctx.rule_hits, a, str(path))
+        notify.notify_escalation(cfg, session, reason2, ctx.rule_hits, a, str(path),
+                                 project_dir=ctx.project_dir)
     except Exception as _ne:
         log("error stop: notification failed: %s" % _ne)
     return 2
@@ -2022,7 +2025,8 @@ def _act_ask_user(ctx: "ActionCtx") -> int:
     log("ASKED USER (no prompts until an answer): %s" % ctx.reason)
     try:
         from . import notify
-        notify.notify_escalation(cfg, session, ctx.reason, ctx.rule_hits, a, str(path), kind="escalation")
+        notify.notify_escalation(cfg, session, ctx.reason, ctx.rule_hits, a, str(path),
+                                 kind="escalation", project_dir=ctx.project_dir)
     except Exception as e:
         log("ask_user: notification failed: %s" % e)
     return 9
@@ -2063,7 +2067,8 @@ def _act_done(ctx: "ActionCtx") -> int:
             % (html.escape(reason, quote=False), (session.get("title") or "")[:60], warn),
             eid="plandone:%s:%s" % (session["id"], last_mid),
             meta={"session": str(session["id"])[-8:],
-                  "title": (session.get("title") or "")[:60]})
+                  "title": (session.get("title") or "")[:60]},
+            project_dir=ctx.project_dir)
     except Exception as _ne:
         log("DONE: notification failed: %s" % _ne)
     return 6

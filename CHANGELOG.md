@@ -20,12 +20,21 @@ it dynamically); entries are added under **Unreleased** until a version is tagge
   self-test suites in-process under pytest.
 - This changelog; the package version is single-sourced from
   `opencode_hawk/__init__.py`.
+- Screenshot attachments on phone alerts: with `notify.ntfy.attach_screenshots`
+  (default on) the newest recent image a workflow left in the session's
+  project dir (root, `.playwright-mcp/`, `docs/screenshots/`, `screenshots/`,
+  `.opencode/tmp/`) is uploaded and attached to its escalation / plan_done
+  push; best-effort, falling back to a text alert.
 
 ### Changed
 - `apply_action` is split into an action-handler registry (`_ACTION_HANDLERS`);
   `evaluate` documents its first-match rule order as a numbered catalog.
 - `poll_once` and `poll_multisession` share one engine (`poll_ctx`) and an
   explicit `Ctx`; `analyze()` is computed once per poll and shared.
+- ntfy reply routing is multi-session aware: a reply goes to the sessions
+  awaiting an answer, else to every enabled monitored session; with more than
+  one candidate ntfy now asks which session (numbered prompt with a readable
+  label) instead of silently routing to the most recent escalation.
 
 ### Fixed
 - Per-session tracking is keyed by the evaluated leaf session, not the
