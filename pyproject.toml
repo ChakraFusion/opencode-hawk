@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "opencode-hawk"
-version = "0.2.0"
+dynamic = ["version"]
 description = "Coordinator that keeps long-running, multi-agent OpenCode workflows moving: auto-continue, llama-server watchdog, ntfy phone alerts and a local dashboard."
 readme = "README.md"
 license = "MIT"
@@ -29,6 +29,10 @@ hawk = "opencode_hawk.cli:main"
 
 [tool.setuptools]
 packages = ["opencode_hawk"]
+
+[tool.setuptools.dynamic]
+# Single source of truth: opencode_hawk/__init__.py:__version__
+version = { attr = "opencode_hawk.__version__" }
 
 [tool.setuptools.package-data]
 opencode_hawk = ["web/*", "config.example.json", "opencode-plugin/*"]
