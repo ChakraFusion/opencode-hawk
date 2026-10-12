@@ -1070,6 +1070,28 @@ def message_error_kind(messages) -> tuple[str, str]:
     return "", ""
 
 
+def message_abort_mid(messages) -> str:
+    """id of the newest assistant message a user/UI interrupt aborted, else "".
+
+    OpenCode records an interrupt as an error named MessageAbortedError (tests
+    use AbortError). A later user message means the human already moved on. This
+    is NOT a provider/ooc error - message_error_kind deliberately ignores it -
+    but a deliberate stop must not be mistaken for a worker that stalled, so
+    evaluate() records it and stands down on that message."""
+    if not messages:
+        return ""
+    last = messages[-1]
+    if last.get("role") != "assistant":
+        return ""
+    err = (last.get("raw") or {}).get("error")
+    if not isinstance(err, dict):
+        return ""
+    name = str(err.get("name") or "")
+    if "abort" in name.lower():
+        return last.get("id") or ""
+    return ""
+
+
 # ── Continue injection ───────────────────────────────────────────────────────
 def find_opencode() -> str | None:
     if os.environ.get("OPENCODE_BIN"):
@@ -1209,8 +1231,10 @@ def session_agent(session_id) -> str:
                         return ag
         finally:
             con.close()
-    except Exception:
-        pass
+    except (sqlite3.Error, OSError) as e:
+        # A broken/absent DB must not crash the poll, but silence here once hid
+        # a mis-specified db_path; keep it visible at debug level.
+        log_debug("session_agent(%s): %s" % (str(session_id)[-8:], e))
     return ""
 
 
@@ -1340,6 +1364,22 @@ def evaluate(cfg, session, parts, messages, state, mstate=None, analysis=None):
     err_kind, err_text = message_error_kind(messages)
     if err_kind:
         return ("context_overflow" if err_kind == "ooc" else "provider_error"), err_text, [err_text[:300]]
+
+    # ── User-interrupt stand-down ────────────────────────────────────────────
+    # A turn the user/UI aborted ("unterbrochen") is a deliberate stop, not a
+    # stall: recording it here stops the self-check prompt from firing on the
+    # aborting message. A NEW message (the human's fresh turn, or the worker
+    # moving on) clears the latch and the normal loop resumes. This is the only
+    # place aborts are noticed - message_error_kind does not classify them.
+    new_abort = message_abort_mid(messages)
+    if new_abort:
+        if state.get("abort_mid") != new_abort:
+            state["abort_mid"] = new_abort
+            state["abort_at"] = now_ms
+        return "nothing", "user interrupted this turn; standing down", []
+    if state.get("abort_mid") and state.get("abort_mid") != last_mid:
+        state.pop("abort_mid", None)
+        state.pop("abort_at", None)
 
     last_t = last_part_time(parts)
     recent_activity = bool(last_t) and (now_ms - last_t) < cfg["idle_minutes"] * 60_000
@@ -1837,8 +1877,8 @@ def _act_continue(ctx: "ActionCtx") -> int:
                 notify.notify_escalation(cfg, session,
                                          ctx.reason or "self-check delivery failed (CLI unavailable); will retry",
                                          ctx.rule_hits, a, str(path))
-            except Exception:
-                pass
+            except Exception as e:
+                log_debug("notify: escalation (self-check delivery failed) failed: %s" % e)
         else:
             log("self-check delivery failed at last_evaluated_mid=%s; "
                 "retrying on a later poll (last artifact %ds ago)"
@@ -1862,8 +1902,8 @@ def _act_continue(ctx: "ActionCtx") -> int:
                 eid="cont:%s:%s" % (session["id"], last_mid),
                 meta={"session": str(session["id"])[-8:],
                       "title": (session.get("title") or "")[:60]})
-        except Exception:
-            pass
+        except Exception as e:
+            log_debug("notify: record_event(continue) failed: %s" % e)
     if ctx.action == "confirm_done":
         log("CONFIRMATION ASKED (first STOP: DONE)")
         try:
@@ -1871,8 +1911,8 @@ def _act_continue(ctx: "ActionCtx") -> int:
             a = ctx.analysis()
             notify.notify_escalation(cfg, session, ctx.reason, ctx.rule_hits, a, "",
                                      kind="confirm_done")
-        except Exception:
-            pass
+        except Exception as e:
+            log_debug("notify: escalation (confirm_done) failed: %s" % e)
     elif ctx.action == "done_rejected":
         log("DONE REJECTED (open items): %s" % " | ".join(ctx.rule_hits))
     else:
@@ -1929,8 +1969,8 @@ def _act_llama_down(ctx: "ActionCtx") -> int:
                 kind="llama",
                 eid="llamafail:%d" % int(time.time()),
                 meta={"kind": "llama_down"})
-    except Exception:
-        pass
+    except Exception as e:
+        log_debug("notify: llama_down alert failed: %s" % e)
     return 7 if ok else 8
 
 

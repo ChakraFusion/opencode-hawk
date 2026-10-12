@@ -30,7 +30,7 @@ import threading
 import uuid
 from urllib.parse import quote
 
-from .coordinator import log, load_config, extract_choices
+from .coordinator import log, log_debug, load_config, extract_choices
 from . import coordinator as _hawk
 
 NOTIFY_LOG_CAP = 500
@@ -163,8 +163,8 @@ def _load_map() -> dict:
             with open(p, "r", encoding="utf-8-sig") as f:
                 d = json.load(f)
             return d if isinstance(d, dict) else {}
-    except Exception:
-        pass
+    except (OSError, ValueError) as e:
+        log_debug("notify: unreadable route map: %s" % e)
     return {}
 
 
@@ -224,8 +224,8 @@ def load_push_state() -> dict:
             with open(p, "r", encoding="utf-8-sig") as f:
                 d = json.load(f)
             return d if isinstance(d, dict) else {}
-    except Exception:
-        pass
+    except (OSError, ValueError) as e:
+        log_debug("notify: unreadable push state: %s" % e)
     return {}
 
 
@@ -361,8 +361,10 @@ def _post_ntfy(cfg, title: str, body: str, tags: str = "",
                 try:
                     raw = resp.read().decode("utf-8", errors="replace")
                     msg_id = str(json.loads(raw).get("id") or "")
-                except Exception:
-                    pass
+                except (ValueError, AttributeError) as e:
+                    # Response body not the expected JSON: keep msg_id empty, but
+                    # leave a breadcrumb - a broken publish must be diagnosable.
+                    log_debug("notify: unparseable publish response: %s" % e)
         log("notify: pushed to ntfy topic %s (%d action(s)) id=%s"
             % (n["topic"], len(actions or []), msg_id or "?"))
         if ok:
@@ -429,8 +431,8 @@ def _ntfy_raw_history(cfg) -> list:
                 continue  # empty / SSE keepalive rows
             try:
                 ev = json.loads(line)
-            except Exception:
-                continue
+            except ValueError:
+                continue  # non-JSON row on the stream
             events.append(ev)
     return events
 
@@ -653,8 +655,8 @@ def _track_self_id(msg_id: str) -> None:
         ids.append(msg_id)
         m["_ntfy_self"] = ids[-100:]  # cap at 100
         _save_map(m)
-    except Exception:
-        pass
+    except Exception as e:
+        log_debug("notify: could not record self-sent id: %s" % e)
 
 
 def notify_escalation(cfg, session, reason, rule_hits, analysis, es_path,
@@ -673,8 +675,8 @@ def notify_escalation(cfg, session, reason, rule_hits, analysis, es_path,
     options = []
     try:
         options = extract_choices(last)
-    except Exception:
-        pass
+    except Exception as e:
+        log_debug("notify: choice extraction failed: %s" % e)
 
     plain = "Reason: %s\n" % reason
     plain += "Session: %s\n" % (title[:60] or sid[-8:])
@@ -707,8 +709,8 @@ def notify_escalation(cfg, session, reason, rule_hits, analysis, es_path,
                 awaiting.append(sid)
             m["_ntfy_awaiting"] = awaiting
             _save_map(m)
-        except Exception:
-            pass
+        except Exception as e:
+            log_debug("notify: could not mark session awaiting a reply: %s" % e)
     return sent
 
 
@@ -765,8 +767,8 @@ def load_pending_route() -> dict:
                 d = json.load(f)
             if isinstance(d, dict) and d.get("ts"):
                 return d
-    except Exception:
-        pass
+    except (OSError, ValueError) as e:
+        log_debug("notify: unreadable pending route: %s" % e)
     return {}
 
 
@@ -901,7 +903,7 @@ def poll_ntfy_replies(apply_reply) -> int:
             continue
         try:
             ev = json.loads(line)
-        except Exception:
+        except ValueError:
             continue
         event = ev.get("event") or ""
         mid = ev.get("id") or ""

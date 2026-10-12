@@ -1111,6 +1111,28 @@ def _self_test_impl():
         "OK" if ok_e else "MISMATCH",
         "provider/ooc escalate once then quiet; new msg releases"))
 
+    # evaluate abort stand-down: a user/UI interrupt ("unterbrochen") on the
+    # newest assistant message is a deliberate stop, not a stall - evaluate
+    # returns nothing and records abort_mid/abort_at; a NEW message clears the
+    # latch so the normal loop resumes.
+    st_ab = {}
+    abort_msgs = [{"id": "mab", "role": "assistant",
+                   "raw": {"error": {"name": "MessageAbortedError"}}}]
+    act_ab, reason_ab, _ = evaluate(cfg_e, None, [], abort_msgs, st_ab)
+    act_ab2, _, _ = evaluate(cfg_e, None, [], abort_msgs, st_ab)
+    st_ac = {"abort_mid": "mab", "abort_at": 1}
+    evaluate(cfg_e, None, [], [{"id": "mnew", "role": "user", "time_data": {}}], st_ac)
+    ok_ab = (act_ab == "nothing" and act_ab2 == "nothing"
+             and st_ab.get("abort_mid") == "mab" and int(st_ab.get("abort_at") or 0) > 0
+             and "interrupted" in reason_ab
+             and "abort_mid" not in st_ac and "abort_at" not in st_ac)
+    results.append(("evaluate_abort_standdown", "pass", "pass", ok_ab,
+                    "interrupt stands down + records; new msg clears", []))
+    print("%-26s expect=%-8s got=%-8s %s  %s" % (
+        "evaluate_abort_standdown", "pass", "pass",
+        "OK" if ok_ab else "MISMATCH",
+        "interrupt stands down + records; new msg clears"))
+
     # apply_action error stop: latch err_mid/err_kind, hold the cadence, write
     # the escalation + note, and do NOT send a self-check prompt (return 2).
     ga_e = apply_action.__globals__
