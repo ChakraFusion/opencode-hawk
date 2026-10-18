@@ -1039,6 +1039,33 @@ def update_session_settings(payload: dict) -> dict:
 
 
 _ntfy_channel_cache = {"t": 0.0, "v": []}
+# Reentrancy guard for the background refresh (process-local; only ever
+# touched under this lock).
+_ntfy_channel_lock = threading.Lock()
+_ntfy_channel_refreshing = False
+
+
+def _refresh_channel(cfg) -> None:
+    """Fetch the topic's pollable history off the request thread.
+
+    /api/ntfy is polled every 2 s by the dashboard, so fetching here would stall
+    that request for up to _ntfy_raw_history's 15 s timeout whenever ntfy is slow
+    or unreachable -- exactly the moment the outage banner needs this endpoint to
+    stay responsive. The handler kicks this off and returns the last good
+    snapshot immediately."""
+    global _ntfy_channel_refreshing
+    from . import notify
+    try:
+        v = notify.ntfy_channel_state(cfg)
+        _ntfy_channel_cache.update(t=time.time(), v=v)
+    except Exception:
+        # Advance the clock even on failure: otherwise an unreachable ntfy
+        # would re-attempt the history fetch on every 2 s refresh, and the
+        # outage banner depends on those refreshes landing promptly.
+        _ntfy_channel_cache["t"] = time.time()
+    finally:
+        with _ntfy_channel_lock:
+            _ntfy_channel_refreshing = False
 
 
 def ntfy_payload() -> dict:
@@ -1052,15 +1079,28 @@ def ntfy_payload() -> dict:
     # half of that; polling faster starved deletes into HTTP 429. Deletes
     # update this cache directly, so the list still reacts instantly.
     # On a transient fetch failure the last good snapshot is kept.
+    # The fetch itself happens on a worker thread: /api/ntfy is what the
+    # dashboard hits every 2 s, and ntfy's history endpoint can block for 15 s
+    # when ntfy is unreachable, which used to stall this request path.
+    global _ntfy_channel_refreshing
+    start = False
     if _t.time() - _ntfy_channel_cache["t"] > 30:
-        try:
-            _ntfy_channel_cache.update(t=_t.time(), v=notify.ntfy_channel_state(cfg))
-        except Exception:
-            pass  # stale-but-last-good stays in the cache
+        with _ntfy_channel_lock:
+            if not _ntfy_channel_refreshing:
+                _ntfy_channel_refreshing = True
+                start = True
+    if start:
+        threading.Thread(target=_refresh_channel, args=(cfg,), daemon=True,
+                         name="ntfy-channel-refresh").start()
     return {
         "topic": n["topic"],
         "server": n["server"],
         "log": notify.load_notify_log(),
+        # Reachability for the "phone notifications are failing" banner: the
+        # last real publish/reply-poll outcome recorded by notify. No probe is
+        # fired from the request path -- reachable is False only once an
+        # actual exchange has failed.
+        "health": notify.ntfy_health(cfg),
         # Cleared in the dashboard but possibly not yet deleted on the server: stays hidden (12 h).
         "channel": [m for m in _ntfy_channel_cache["v"]
                     if m.get("seq", m.get("id")) not in notify.hidden_ids()],

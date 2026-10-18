@@ -4,7 +4,9 @@ Covers: kinds_enabled fallback, record_event gate ordering (topic -> eid
 dedupe -> kinds gate -> cooldown), watermarks, resolve_pending_route, every
 reply-routing branch in poll_ntfy_replies (single awaiting, digit-resolves-
 prompt, supersede, single-candidate echo, unrouted, multi-candidate prompt,
-multi-awaiting prompt), and screenshot discovery/upload/attachment.
+multi-awaiting prompt), screenshot discovery/upload/attachment, the ntfy
+reachability record behind the web UI outage banner, and reply-poll pacing
+(throttle persisted across failures, exponential backoff, Retry-After).
 
 Hermetic: monkey-patches the home dir, config loader, ntfy HTTP layer,
 urlopen, and the reply queue so the real home state, config.json, ntfy
@@ -280,6 +282,18 @@ def test_cooldown():
                   {"notify": {"ntfy": {"kind_cooldown_s": {"nudge": 5}}}},
                   "nudge") == 5
               and notify.cooldown_s({}, "nudge") == 60)
+
+        # Configuring one kind's cooldown must not wipe the default for the
+        # others (this silently made every unspecified kind push immediately).
+        cfg_cd = {"notify": {"ntfy": {"kind_cooldown_s": {"commit": 30}}}}
+        check("cooldown: unspecified kinds keep their default",
+              notify.cooldown_s(cfg_cd, "commit") == 30
+              and notify.cooldown_s(cfg_cd, "nudge") == 60
+              and notify.cooldown_s(cfg_cd, "subagent") == 0)
+        check("cooldown: explicit 0 still opts a kind out",
+              notify.cooldown_s(
+                  {"notify": {"ntfy": {"kind_cooldown_s": {"subagent": 0}}}},
+                  "subagent") == 0)
     finally:
         r()
 
@@ -875,6 +889,187 @@ def test_send_429_retry():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_ntfy_health():
+    """ntfy_health() derives the web UI outage banner from the last real
+    exchange; it never touches the network and never raises."""
+    tmp = Path(tempfile.mkdtemp(prefix="ntfy-health-"))
+    orig_home = hawk.home_dir
+    hawk.home_dir = lambda: tmp
+    orig_urlopen = urllib.request.urlopen
+    try:
+        cfg = {"notify": {"ntfy": {"topic": "t", "server": "https://ntfy.sh"}}}
+
+        # Any network attempt here would raise (no real I/O is expected).
+        def blowup(req, timeout=None):
+            raise AssertionError("ntfy_health must not touch the network")
+        urllib.request.urlopen = blowup
+
+        # No topic -> not configured, never warns.
+        h = notify.ntfy_health({"notify": {"ntfy": {"topic": ""}}})
+        check("health: unconfigured topic",
+              h["configured"] is False and h["reachable"] is True)
+
+        # No record yet (fresh install) -> reachable, no false alarm.
+        check("health: no record -> reachable, source none",
+              notify.read_ntfy_health() == {}
+              and notify.ntfy_health(cfg)["source"] == "none"
+              and notify.ntfy_health(cfg)["reachable"] is True)
+
+        # A failed exchange -> unreachable, error + since surfaced.
+        notify.record_ntfy_exchange(False, "<urlopen error timed out>")
+        h = notify.ntfy_health(cfg)
+        check("health: failure -> unreachable",
+              h["reachable"] is False and h["source"] == "exchange"
+              and "timed out" in h["error"] and h["since_ms"] > 0
+              and h["stale"] is False)
+
+        # A later success clears the warning and keeps last_ok_ms.
+        notify.record_ntfy_exchange(True)
+        h = notify.ntfy_health(cfg)
+        check("health: success -> reachable, last_ok_ms set",
+              h["reachable"] is True and h["source"] == "exchange"
+              and h["last_ok_ms"] > 0 and h["error"] == "")
+
+        # A very old record is flagged stale (still reports the last state).
+        (notify._health_path()).write_text(
+            json.dumps({"ok": False, "ts": 1, "error": "old",
+                        "last_ok_ms": 5}), encoding="utf-8")
+        h = notify.ntfy_health(cfg)
+        check("health: old record flagged stale",
+              h["stale"] is True and h["last_ok_ms"] == 5)
+    finally:
+        urllib.request.urlopen = orig_urlopen
+        hawk.home_dir = orig_home
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_poll_backoff():
+    """poll_ntfy_replies must never hammer a failing ntfy server.
+
+    The throttle has to be persisted *before* the request: saving only after a
+    successful parse meant every failure threw the 10 s throttle away, so an
+    unreachable ntfy was re-polled on every monitor loop tick (~1/s). That
+    sustained burst is what tripped ntfy's rate limiter and got this machine's
+    IP banned (and it recurred on each later hiccup). Failures now widen the
+    gap -- honouring an explicit Retry-After -- and a success resets it."""
+    tmp = Path(tempfile.mkdtemp(prefix="ntfy-backoff-"))
+    orig_home = hawk.home_dir
+    hawk.home_dir = lambda: tmp
+    orig_loadcfg = notify.load_config
+    orig_urlopen = urllib.request.urlopen
+    notify.load_config = lambda: {"notify": {"ntfy": {"topic": "t",
+                                                     "server": "https://ntfy.sh"}}}
+    cfg = notify.load_config()
+    calls = {"n": 0}
+
+    def boom(req, timeout=None):
+        calls["n"] += 1
+        raise urllib.error.URLError("<urlopen error timed out>")
+
+    def raise429(req, timeout=None):
+        calls["n"] += 1
+        raise urllib.error.HTTPError("https://ntfy.sh/t", 429,
+                                     "Too Many Requests",
+                                     {"Retry-After": "300"}, None)
+
+    def empty(req, timeout=None):
+        calls["n"] += 1
+        return FakeResp("")
+
+    def force(fn):
+        """Make the next poll actually fire: rewind the persisted throttle."""
+        urllib.request.urlopen = fn
+        m = notify._load_map()
+        m["_ntfy_polled_at"] = 0
+        notify._save_map(m)
+        notify.poll_ntfy_replies(lambda s, t: None)
+        return notify._load_map()
+
+    def ok_poll():
+        m = force(empty)
+        # A success must clear the breaker for the very next attempt.
+        return m
+
+    try:
+        # ---- pacing helpers are pure and capped -------------------------
+        check("poll: Retry-After read only from 429/503",
+              notify._retry_after_s(urllib.error.HTTPError(
+                  "u", 429, "m", {"Retry-After": "45"}, None)) == 45
+              and notify._retry_after_s(urllib.error.HTTPError(
+                  "u", 503, "m", {"Retry-After": "7"}, None)) == 7
+              and notify._retry_after_s(urllib.error.HTTPError(
+                  "u", 500, "m", {"Retry-After": "7"}, None)) is None
+              and notify._retry_after_s(urllib.error.URLError(
+                  "timed out")) is None
+              and notify._retry_after_s(urllib.error.HTTPError(
+                  "u", 429, "m", {"Retry-After": "not-a-number"}, None)) is None)
+
+        check("poll: gap schedule, floor and Retry-After cap",
+              notify._poll_gap_ms(1) == notify.NTFY_POLL_MIN_GAP_S * 1000
+              and notify._poll_gap_ms(4) == notify.NTFY_POLL_BACKOFF_S[-1] * 1000
+              and notify._poll_gap_ms(99) == notify.NTFY_POLL_BACKOFF_S[-1] * 1000
+              and notify._poll_gap_ms(1, retry_after=45) == 45_000
+              and notify._poll_gap_ms(1, retry_after=1)
+              == notify.NTFY_POLL_MIN_GAP_S * 1000
+              and notify._poll_gap_ms(1, retry_after=999_999)
+              == notify.NTFY_POLL_RETRY_AFTER_CAP_S * 1000)
+
+        # ---- 1. a failed attempt still throttles the next one ----------
+        urllib.request.urlopen = boom
+        notify._save_map({})
+        notify.poll_ntfy_replies(lambda s, t: None)
+        after_first = calls["n"]
+        notify.poll_ntfy_replies(lambda s, t: None)
+        check("poll: failure still advances the throttle",
+              after_first == 1 and calls["n"] == 1,
+              "after_first=%s calls=%s" % (after_first, calls["n"]))
+
+        # ---- 2. consecutive failures widen the gap ---------------------
+        m = notify._load_map()
+        check("poll: first failure recorded in map",
+              m.get("_ntfy_fails") == 1
+              and m.get("_ntfy_gap_ms") == notify.NTFY_POLL_MIN_GAP_S * 1000,
+              "fails=%s gap=%s" % (m.get("_ntfy_fails"), m.get("_ntfy_gap_ms")))
+
+        for _ in range(3):
+            force(boom)
+        m = notify._load_map()
+        check("poll: gap widens with consecutive failures",
+              m.get("_ntfy_fails") == 4
+              and m.get("_ntfy_gap_ms")
+              == notify.NTFY_POLL_BACKOFF_S[-1] * 1000,
+              "fails=%s gap=%s" % (m.get("_ntfy_fails"), m.get("_ntfy_gap_ms")))
+
+        # One network attempt per poll -- no hidden in-call retry loop.
+        check("poll: exactly one attempt per poll", calls["n"] == 4,
+              "calls=%s" % calls["n"])
+
+        # ---- 3. ntfy's own Retry-After is honoured ---------------------
+        m = force(raise429)
+        check("poll: 429 Retry-After widens the gap",
+              m.get("_ntfy_fails") == 5 and m.get("_ntfy_gap_ms") == 300_000,
+              "fails=%s gap=%s" % (m.get("_ntfy_fails"), m.get("_ntfy_gap_ms")))
+        check("poll: health counts consecutive failures",
+              notify.ntfy_health(cfg)["fails"] == 5
+              and notify.ntfy_health(cfg)["reachable"] is False)
+
+        # ---- 4. a success resets pacing to normal ----------------------
+        m = ok_poll()
+        check("poll: success resets breaker and gap",
+              m.get("_ntfy_fails") == 0
+              and m.get("_ntfy_gap_ms") == notify.NTFY_POLL_MIN_GAP_S * 1000,
+              "fails=%s gap=%s" % (m.get("_ntfy_fails"), m.get("_ntfy_gap_ms")))
+        h = notify.ntfy_health(cfg)
+        check("poll: success clears health failure count",
+              h["fails"] == 0 and h["reachable"] is True,
+              "h=%s" % h)
+    finally:
+        urllib.request.urlopen = orig_urlopen
+        notify.load_config = orig_loadcfg
+        hawk.home_dir = orig_home
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     test_kinds_enabled()
     test_record_event_gates()
@@ -891,6 +1086,8 @@ def main():
     test_fit_ntfy()
     test_delete_ops()
     test_send_429_retry()
+    test_ntfy_health()
+    test_poll_backoff()
     print("\n%d passed, %d failed" % (PASS, FAIL))
     return 1 if FAIL else 0
 

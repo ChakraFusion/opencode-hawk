@@ -50,6 +50,21 @@ NTFY_429_WAITS_S = [6, 12, 20]
 # Back-compat alias for the delete path's historical name.
 DELETE_429_WAITS_S = NTFY_429_WAITS_S
 
+# Reply-poll pacing. The gap between reply polls is persisted *before* the
+# request, so a failed poll still counts: the old code only saved the map
+# after a successful parse, which meant every failure reset the 10 s throttle
+# and the monitor re-polled on every loop tick (~1/s). That burst is what
+# tripped ntfy's per-client rate limiter and temporarily blocked this
+# machine's IP (it recurs whenever ntfy hiccupped). Consecutive failures now
+# widen the gap so a 429 storm or a blackholed node is never hammered.
+NTFY_POLL_MIN_GAP_S = 10                    # normal spacing between reply polls
+# Gap after 1, 2, 3, 4+ consecutive failures. Capped at 2 min: long enough
+# that a dead node is left alone, short enough that replies resume quickly
+# once ntfy comes back.
+NTFY_POLL_BACKOFF_S = [10, 30, 60, 120]
+# An ntfy Retry-After header may demand a longer wait than our schedule.
+NTFY_POLL_RETRY_AFTER_CAP_S = 600
+
 # Event taxonomy: everything the phone can be notified about. The web UI
 # renders one checkbox per kind (gate the phone push only; the web timeline
 # and sent/received list always show all kinds).
@@ -60,6 +75,12 @@ EVENT_KINDS = ["commit", "milestone", "escalation", "plan_done", "continue",
 DEFAULT_NOTIFY_KINDS = ["escalation", "plan_done", "test"]
 # Chatty kinds get a minimum gap between phone pushes (seconds); others push
 # immediately. Overridable via notify.ntfy.kind_cooldown_s.
+# NOTE on subagent: it is the chattiest kind (a parallel subagent tree can
+# finish several at once -- 74 pushes in 8 min, ~400 ms apart, earned ntfy's
+# first real 429s), but a cooldown here would break the deliberate intent that
+# a subagent's started and finished both ring (see subagent_state_eids in the
+# selftest). Rate-limiting subagent pushes is therefore a product decision, not
+# a default; the poll-side pacing is handled in poll_ntfy_replies instead.
 DEFAULT_KIND_COOLDOWNS_S = {"commit": 60, "continue": 60, "nudge": 60}
 # Where a workflow tends to drop screenshots on its own, relative to the
 # session's project_dir (scanned in addition to the project root itself). Any
@@ -197,6 +218,135 @@ def _ntfy_cfg(cfg) -> dict:
     }
 
 
+# ---- ntfy reachability (surfaced in the web UI) ---------------------------
+# A push or reply poll that fails (connection refused / timeout / 429 / a
+# blackholed IP) is recorded so the dashboard can warn while the phone has
+# silently stopped receiving notifications. The two continuous paths
+# (_post_ntfy, poll_ntfy_replies) are the heartbeat: whatever they last saw is
+# the signal. No extra network I/O happens here, so the dashboard request path
+# stays free of probes.
+NTFY_HEALTH_TTL_S = 90      # a recorded exchange older than this is "stale"
+
+
+def _health_path():
+    return _hawk.home_dir() / "ntfy_health.json"
+
+
+def read_ntfy_health() -> dict:
+    """Outcome of the last recorded ntfy exchange, or {} when none/unreadable."""
+    try:
+        with open(_health_path(), "r", encoding="utf-8-sig") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def record_ntfy_exchange(ok: bool, error: str = "") -> None:
+    """Remember whether the last real ntfy send/poll succeeded (best-effort).
+
+    Also counts consecutive failures, so the UI can show how long ntfy has been
+    down rather than only "down right now".
+    Never raises: a health write must not be able to break delivery."""
+    now_ms = int(_time.time() * 1000)
+    prev = read_ntfy_health()
+    rec = {
+        "ok": bool(ok),
+        "ts": now_ms,
+        "error": "" if ok else str(error)[:200],
+        "last_ok_ms": now_ms if ok else int(prev.get("last_ok_ms") or 0),
+        "fails": 0 if ok else int(prev.get("fails") or 0) + 1,
+    }
+    try:
+        p = _health_path()
+        # Per-pid tmp + os.replace, like _write_log: a reader can never see a
+        # half-written file.
+        tmp = p.with_name("%s.%d.tmp" % (p.name, os.getpid()))
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(rec, f, ensure_ascii=False)
+        os.replace(tmp, p)
+    except Exception:
+        pass
+
+
+def ntfy_health(cfg) -> dict:
+    """Reachability of the ntfy server for the web UI warning banner, derived
+    from the last real send/poll outcome.
+
+    Returns {"configured", "server", "reachable", "source", "since_ms",
+    "last_ok_ms", "error", "stale", "fails"}. reachable is False only after an
+    observed failure, so a fresh install (no record yet) never raises a false
+    alarm; "fails" is the number of consecutive failed exchanges (0 when ok).
+    Never raises and never touches the network."""
+    n = _ntfy_cfg(cfg)
+    out = {"configured": bool(n["topic"]), "server": n["server"],
+           "reachable": True, "source": "none", "since_ms": 0,
+           "last_ok_ms": 0, "error": "", "stale": False, "fails": 0}
+    if not n["topic"]:
+        return out
+    rec = read_ntfy_health()
+    if not rec:
+        return out
+    out["source"] = "exchange"
+    out["last_ok_ms"] = int(rec.get("last_ok_ms") or 0)
+    out["fails"] = int(rec.get("fails") or 0)
+    out["stale"] = (int(_time.time() * 1000) - int(rec.get("ts") or 0)
+                    >= NTFY_HEALTH_TTL_S * 1000)
+    if rec.get("ok"):
+        return out
+    out["reachable"] = False
+    out["error"] = rec.get("error") or "ntfy unreachable"
+    out["since_ms"] = int(rec.get("ts") or 0)
+    return out
+
+
+def _retry_after_s(e) -> int | None:
+    """Seconds ntfy asked us to wait, from a 429/503's Retry-After header.
+
+    Only honored for the status codes that carry it; a bare HTTP-date value
+    (the other legal form) is ignored rather than parsed, since the schedule in
+    _poll_gap_ms already backs off and an unparseable header must never raise."""
+    if getattr(e, "code", None) not in (429, 503):
+        return None
+    try:
+        hdr = e.headers.get("Retry-After") if e.headers else None
+    except Exception:
+        hdr = None
+    if not hdr:
+        return None
+    try:
+        v = int(str(hdr).strip())
+    except ValueError:
+        return None
+    return max(0, min(v, NTFY_POLL_RETRY_AFTER_CAP_S))
+
+
+def _poll_gap_ms(fails: int, retry_after=None) -> int:
+    """Milliseconds to wait before the next reply poll.
+
+    Normal spacing is NTFY_POLL_MIN_GAP_S; each consecutive failure widens it
+    along NTFY_POLL_BACKOFF_S (capped, so replies resume quickly once ntfy is
+    back). An explicit Retry-After never shortens the scheduled gap, and a
+    pathological header can't park polling for hours."""
+    base = NTFY_POLL_BACKOFF_S[min(max(fails - 1, 0),
+                                   len(NTFY_POLL_BACKOFF_S) - 1)] * 1000
+    if retry_after:
+        base = max(base, min(int(retry_after), NTFY_POLL_RETRY_AFTER_CAP_S) * 1000)
+    return max(base, NTFY_POLL_MIN_GAP_S * 1000)
+
+
+def _note_poll_failure(m: dict, retry_after=None) -> int:
+    """Record a poll failure in the reply map and set the next gap.
+
+    The map (not the health file) is the source of truth for pacing: it is the
+    state the throttle already lives in, and it is per-poll rather than shared
+    with the send path."""
+    fails = int(m.get("_ntfy_fails") or 0) + 1
+    m["_ntfy_fails"] = fails
+    m["_ntfy_gap_ms"] = _poll_gap_ms(fails, retry_after)
+    return fails
+
+
 def kinds_enabled(cfg) -> list:
     """The set of kinds the phone push is gated on.
 
@@ -214,9 +364,15 @@ def kinds_enabled(cfg) -> list:
 def cooldown_s(cfg, kind: str) -> int:
     n = (cfg.get("notify") or {}).get("ntfy") or {}
     cd = n.get("kind_cooldown_s")
-    if isinstance(cd, dict):
+    # Only an explicit entry for *this* kind overrides the default. Reading the
+    # dict with a 0 default meant that configuring any cooldown (say, "commit")
+    # silently gave every other kind a cooldown of 0 and threw away the
+    # documented fallback -- which is how subagent completions ended up
+    # unthrottled and produced the push burst that drew ntfy's 429s. An
+    # explicit 0 is still honoured: that is how a kind opts out.
+    if isinstance(cd, dict) and kind in cd:
         try:
-            v = int(cd.get(kind, 0))
+            v = int(cd.get(kind))
             if v >= 0:
                 return v
         except (TypeError, ValueError):
@@ -400,9 +556,11 @@ def _post_ntfy(cfg, title: str, body: str, tags: str = "",
             append_notify_log(entry)
             if msg_id:
                 _track_self_id(msg_id)
+        record_ntfy_exchange(ok)
         return ok
     except Exception as e:
         log("notify: ntfy send failed: %s" % e)
+        record_ntfy_exchange(False, str(e))
         return False
 
 
@@ -1045,12 +1203,22 @@ def poll_ntfy_replies(apply_reply) -> int:
         return 0
     m = _load_map()
 
-    # Throttle: at most once per 10 seconds
+    # Throttle: at most NTFY_POLL_MIN_GAP_S seconds between attempts, widening
+    # after consecutive failures (the circuit breaker).
+    #
+    # The timestamp must be written to disk *before* the request. Saving only
+    # after a successful parse (the old behaviour) meant every failure threw
+    # the throttle away, so an unreachable ntfy was re-polled on every monitor
+    # loop tick (~1/s). That sustained burst is what tripped ntfy's per-client
+    # rate limit and got this machine's IP temporarily blocked, and it
+    # happened again on the next ntfy hiccup.
     now_ms = int(_time.time() * 1000)
     last_polled = int(m.get("_ntfy_polled_at") or 0)
-    if now_ms - last_polled < 10_000:
+    gap_ms = int(m.get("_ntfy_gap_ms") or (NTFY_POLL_MIN_GAP_S * 1000))
+    if now_ms - last_polled < gap_ms:
         return 0
     m["_ntfy_polled_at"] = now_ms
+    _save_map(m)
 
     cursor = m.get("_ntfy_cursor") or ""
     if not cursor:
@@ -1075,8 +1243,20 @@ def poll_ntfy_replies(apply_reply) -> int:
         with urllib.request.urlopen(req, timeout=12) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
     except Exception as e:
+        # No in-call retry loop here on purpose: _post_ntfy may block this
+        # thread for up to 38 s on 429s, but the reply poll runs inside the
+        # monitor's main loop and must stay responsive. Pacing plus the
+        # Retry-After honouring below does the same job across polls instead.
         log("notify: ntfy reply poll failed: %s" % e)
+        record_ntfy_exchange(False, str(e))
+        _note_poll_failure(m, _retry_after_s(e))
+        _save_map(m)
         return 0
+
+    record_ntfy_exchange(True)
+    # Recovered: full speed again from the very next poll.
+    m["_ntfy_fails"] = 0
+    m["_ntfy_gap_ms"] = NTFY_POLL_MIN_GAP_S * 1000
 
     delivered = 0
     new_cursor = cursor

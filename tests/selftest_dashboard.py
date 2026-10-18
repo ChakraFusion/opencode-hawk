@@ -279,6 +279,16 @@ def self_test():
             "topic": "hawk-test", "server": "https://ntfy.sh",
             "priority": 3, "callback_base": "http://127.0.0.1:8765"}
         coordinator.save_json(tmp / "config.json", cfg)
+        # Hermetic: /api/ntfy refreshes the topic's pollable history on a
+        # worker thread. Stub it so the selftest never reaches ntfy.sh (this
+        # test used to hang ~15 s per call here whenever ntfy was
+        # unreachable), and start from an empty cache so the refresh check
+        # below is deterministic.
+        from opencode_hawk import notify
+        old_channel = notify.ntfy_channel_state
+        notify.ntfy_channel_state = lambda c: [
+            {"id": "msg1", "time": 1, "title": "stubbed", "body": "stubbed"}]
+        dash._ntfy_channel_cache.update(t=0.0, v=[])
         for i in range(notify.NOTIFY_LOG_CAP + 20):
             notify.append_notify_log({"ts": i, "dir": "sent", "kind": "test",
                                       "body": "full message %d" % i})
@@ -300,6 +310,36 @@ def self_test():
                   and isinstance(d.get("log"), list)
                   and any(isinstance(e.get("body"), str) and e.get("body")
                           for e in d.get("log") or []))
+            # The channel list is filled by a worker thread, so it need not be
+            # ready on the very first GET -- but it must arrive promptly, and
+            # the request itself must never block on it (a blocking fetch here
+            # stalled /api/ntfy for up to 15 s exactly when the outage banner
+            # needed it responsive).
+            import time as _t
+            chan = []
+            for _ in range(60):
+                d = json.loads(urllib.request.urlopen(
+                    "http://127.0.0.1:%d/api/ntfy" % port, timeout=5).read())
+                chan = d.get("channel") or []
+                if chan:
+                    break
+                _t.sleep(0.05)
+            check("ntfy_channel_refreshed_off_request_thread",
+                  any(m.get("id") == "msg1" for m in chan))
+            # Direct regression test for the stall: with a slow ntfy the
+            # request must still answer immediately. Before the worker-thread
+            # change this call blocked for the full fetch timeout.
+            def _slow_channel(c):
+                _t.sleep(3)
+                return []
+            notify.ntfy_channel_state = _slow_channel
+            dash._ntfy_channel_cache.update(t=0.0, v=[])
+            _t0 = _t.time()
+            json.loads(urllib.request.urlopen(
+                "http://127.0.0.1:%d/api/ntfy" % port, timeout=5).read())
+            check("ntfy_api_get_never_blocks_on_channel_fetch",
+                  (_t.time() - _t0) < 1.5)
+            notify.ntfy_channel_state = old_channel
             import urllib.error
             req3 = urllib.request.Request(
                 "http://127.0.0.1:%d/api/ntfy" % port,
@@ -395,6 +435,7 @@ def self_test():
         finally:
             server.shutdown(); th.join(timeout=3)
     finally:
+        notify.ntfy_channel_state = old_channel
         coordinator.home_dir = old_home
         shutil.rmtree(tmp, ignore_errors=True)
 

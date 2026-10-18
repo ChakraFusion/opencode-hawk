@@ -940,6 +940,21 @@ function renderNtfy(d) {
   if (inp && document.activeElement !== inp) inp.value = d.topic || "";
   const sub = $("ntfy-sub");
   if (sub) sub.textContent = (d.topic && d.server) ? d.server + "/" + d.topic : "ntfy not configured";
+  const warn = $("ntfy-warn");
+  if (warn) {
+    const h = d.health || {};
+    const down = h.configured && h.reachable === false;
+    warn.hidden = !down;
+    if (down) {
+      let when = "";
+      if (h.since_ms) {
+        try { when = " — failing since " + new Date(h.since_ms).toLocaleTimeString(); }
+        catch (e) {}
+      }
+      warn.textContent = "⚠ ntfy unreachable: phone notifications are failing"
+        + (h.error ? " (" + h.error + ")" : "") + when;
+    }
+  }
   const logUl = $("notify-log");
   if (logUl) renderNtfyList(d, logUl);
   const clr = $("btn-clear-all");
@@ -968,7 +983,7 @@ async function loadNtfy() {
   try {
     const d = await fetchJSON("/api/ntfy");
     ntfyCache = d;
-    const key = JSON.stringify([d.topic, d.log, d.channel]);
+    const key = JSON.stringify([d.topic, d.log, d.channel, d.health]);
     if (key !== ntfyCache.lastKey) {
       ntfyCache.lastKey = key;
       renderNtfy(d);
