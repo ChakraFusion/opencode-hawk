@@ -1,12 +1,15 @@
 """Self-test for the unified ntfy event pipeline.
 
 Covers: kinds_enabled fallback, record_event gate ordering (topic -> eid
-dedupe -> kinds gate -> cooldown), watermarks, resolve_pending_route, every
+dedupe -> kinds gate -> cooldown -> burst coalescing), watermarks,
+resolve_pending_route, every
 reply-routing branch in poll_ntfy_replies (single awaiting, digit-resolves-
 prompt, supersede, single-candidate echo, unrouted, multi-candidate prompt,
 multi-awaiting prompt), screenshot discovery/upload/attachment, the ntfy
-reachability record behind the web UI outage banner, and reply-poll pacing
-(throttle persisted across failures, exponential backoff, Retry-After).
+reachability record behind the web UI outage banner, reply-poll pacing
+(throttle persisted across failures, exponential backoff, Retry-After), and
+burst coalescing (a chatty kind inside an open window ships as one summary
+push while a subagent's started/finished pair still rings twice).
 
 Hermetic: monkey-patches the home dir, config loader, ntfy HTTP layer,
 urlopen, and the reply queue so the real home state, config.json, ntfy
@@ -83,6 +86,9 @@ def install(cfg):
     hawk.home_dir = lambda: tmp
     orig_loadcfg = notify.load_config
     notify.load_config = lambda: cfg
+    # A case that pushed a subagent opens a burst window; if it survived into
+    # the next case the next case's first event would be swallowed by it.
+    notify._cohort_reset()
     orig_post = notify._post_ntfy
     pushes = []
 
@@ -104,6 +110,10 @@ def install(cfg):
         json.dumps({"id": "t1"}))
 
     def restore():
+        # Drop the burst window while home is still stubbed: a timer left
+        # armed by a subagent case would otherwise flush against the real
+        # config and the real ntfy topic after the test is over.
+        notify._cohort_reset()
         hawk.home_dir = orig_home
         notify.load_config = orig_loadcfg
         notify._post_ntfy = orig_post
@@ -294,6 +304,113 @@ def test_cooldown():
               notify.cooldown_s(
                   {"notify": {"ntfy": {"kind_cooldown_s": {"subagent": 0}}}},
                   "subagent") == 0)
+    finally:
+        r()
+
+
+# -------------------------------------------- T3b burst coalescing
+def test_coalesce():
+    """A tree that finishes many tasks at once must not fire one POST each:
+    the first event pushes, the rest of the window ships as one summary, and a
+    subagent's started/finished pair still rings twice."""
+    cfg = {"notify": {"ntfy": {"topic": "t", "kinds": ["subagent", "commit"]}}}
+    r, pushes, _ = install(cfg)
+    try:
+        check("coalesce: opening event pushed individually",
+              notify.record_event(cfg, "subagent", "subagent a: t1", "b",
+                                  eid="sub:a:finished") is True
+              and len(pushes) == 1
+              and pushes[0]["eid"] == "sub:a:finished")
+
+        got = [notify.record_event(cfg, "subagent", "subagent %s: t" % c, "b",
+                                   eid="sub:%s:finished" % c)
+               for c in "bcdefg"]
+        check("coalesce: rest of burst collected, no extra POST",
+              got == [True] * 6 and len(pushes) == 1)
+
+        check("coalesce: collected eid remembered (duplicate dropped)",
+              notify.record_event(cfg, "subagent", "subagent b: t", "b",
+                                  eid="sub:b:finished") is False
+              and len(pushes) == 1)
+
+        check("coalesce: flush sends one summary naming the count",
+              notify._flush_cohort() is True and len(pushes) == 2
+              and pushes[-1]["kind"] == "subagent"
+              and "6 subagent event" in pushes[-1]["title"]
+              and "- subagent b: t" in pushes[-1]["body"]
+              and "robot" in (pushes[-1]["tags"] or ""))
+
+        check("coalesce: second flush has nothing left",
+              notify._flush_cohort() is False and len(pushes) == 2)
+
+        # started + finished of one task both ring (subagent_state_eids); only
+        # ONE such exemption exists per window, so an entity cannot stream.
+        notify.record_event(cfg, "subagent", "subagent h: t8", "started",
+                            eid="sub:h:started", meta={"state": "started"})
+        notify.record_event(cfg, "subagent", "subagent h: t8", "finished",
+                            eid="sub:h:finished", meta={"state": "finished"})
+        check("coalesce: started/finished pair both pushed",
+              len(pushes) == 4
+              and [p["eid"] for p in pushes[2:4]] == ["sub:h:started",
+                                                     "sub:h:finished"])
+        check("coalesce: third event for that entity is collected",
+              notify.record_event(cfg, "subagent", "subagent h: t8", "again",
+                                  eid="sub:h:requeued") is True
+              and len(pushes) == 4)
+
+        check("coalesce: other kinds push normally inside a window",
+              notify.record_event(cfg, "commit", "c", "b", eid="c1") is True
+              and len(pushes) == 5)
+
+        # The cap closes the window rather than collecting without bound: the
+        # overflow event is pushed on its own so it is never dropped.
+        notify._cohort_reset()
+        orig_cap = notify.COALESCE_MAX_ITEMS
+        notify.COALESCE_MAX_ITEMS = 3
+        try:
+            notify.record_event(cfg, "subagent", "s0", "b", eid="sub:z0:finished")
+            n0 = len(pushes)
+            for i in range(1, 6):
+                notify.record_event(cfg, "subagent", "s%d" % i, "b",
+                                    eid="sub:z%d:finished" % i)
+            check("coalesce: cap flushes instead of collecting forever",
+                  len(pushes) == n0 + 2
+                  and "3 subagent event" in pushes[-2]["title"]
+                  and pushes[-1]["eid"] == "sub:z4:finished")
+        finally:
+            notify.COALESCE_MAX_ITEMS = orig_cap
+
+        # A window that outlived its process is finished by the next event
+        # instead of losing the burst that was collected before the restart.
+        notify._cohort_reset()
+        stale = notify._cohort_empty()
+        stale["kind"] = "subagent"
+        stale["since"] = notify._time.time() - notify.COALESCE_WINDOW_S - 1
+        stale["items"] = [{"title": "[hawk] subagent old: t", "eid": "sub:o:finished"}]
+        hawk.save_json(notify._cohort_path(), stale)
+        n1 = len(pushes)
+        notify.record_event(cfg, "subagent", "subagent new: t", "b",
+                            eid="sub:n:finished")
+        check("coalesce: expired window flushed after a restart",
+              len(pushes) == n1 + 2
+              and "1 subagent event" in pushes[-2]["title"]
+              and pushes[-1]["eid"] == "sub:n:finished")
+
+        # A restart INSIDE the window inherits it but not its timer, so the
+        # next event must re-arm one - otherwise the summary waits forever for
+        # an event that may never come.
+        notify._cohort_reset()
+        live = notify._cohort_empty()
+        live["kind"] = "subagent"
+        live["since"] = notify._time.time() - 5      # 55s of window left
+        live["items"] = [{"title": "[hawk] subagent pending: t", "eid": "sub:p:finished"}]
+        hawk.save_json(notify._cohort_path(), live)
+        n2 = len(pushes)
+        check("coalesce: in-window restart re-arms a timer",
+              notify.record_event(cfg, "subagent", "subagent q: t", "b",
+                                  eid="sub:q:finished") is True
+              and len(pushes) == n2
+              and notify._cohort_timer is not None)
     finally:
         r()
 
@@ -1075,6 +1192,7 @@ def main():
     test_record_event_gates()
     test_llama_kind()
     test_cooldown()
+    test_coalesce()
     test_watermarks()
     test_resolve_pending()
     test_poll_branches()

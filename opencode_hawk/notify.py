@@ -21,8 +21,15 @@ Stdlib-only (urllib + uuid + json). Channel:
 All phone pushes flow through record_event(kind, title, body, eid), which
 applies the notify.ntfy.kinds gate (checkboxes; absent key falls back to the
 default set), per-kind cooldowns (notify.ntfy.kind_cooldown_s) and eid
-dedupe (event_push_state.json). Suppressed events are neither logged nor
-pushed. The web UI always shows every event regardless of the push gate.
+dedupe (event_push_state.json). A coalescable kind (COALESCE_KINDS) then
+joins the open burst window if there is one: the first event of the window
+pushes as usual, the rest are collected and ship together as a single
+summary when the window closes, so a tree that finishes dozens of tasks at
+once costs three messages per minute rather than dozens - which is what
+keeps ntfy from rate-limiting the client (see cohort_push.json).
+Events a gate drops are neither logged nor pushed; a coalesced event is
+remembered as handled and delivered with the summary instead. The web UI
+always shows every event regardless of the push gate.
 """
 
 import json
@@ -82,6 +89,25 @@ DEFAULT_NOTIFY_KINDS = ["escalation", "plan_done", "test"]
 # selftest). Rate-limiting subagent pushes is therefore a product decision, not
 # a default; the poll-side pacing is handled in poll_ntfy_replies instead.
 DEFAULT_KIND_COOLDOWNS_S = {"commit": 60, "continue": 60, "nudge": 60}
+
+# ---- burst coalescing -----------------------------------------------------
+# A parallel subagent tree can finish many tasks at once: 86 subagent pushes in
+# 4 minutes (62 in a single minute, 394 ms apart) is what earns ntfy's
+# per-client rate limit, and a plain cooldown would throw the detail away.
+# Instead the first event of a burst is pushed as usual and the rest are
+# collected, then delivered as ONE summary push when the window closes. At most
+# three messages can leave in any window: the first event, at most one exempt
+# pair-half, and the summary.
+#
+# The exemption matters: a subagent's started and finished are two halves of one
+# task lifecycle and must both ring on the phone (subagent_state_eids pins this).
+# The finish of the task we just announced is not "more of the same", so it is
+# exempt -- but only once per window, so an entity can never stream through.
+COALESCE_KINDS = ["subagent"]
+COALESCE_WINDOW_S = 60         # collect this long, then send one summary
+COALESCE_MAX_LISTED = 5        # titles named in the summary body
+COALESCE_MAX_ITEMS = 100       # collect no further than this (flush instead)
+
 # Where a workflow tends to drop screenshots on its own, relative to the
 # session's project_dir (scanned in addition to the project root itself). Any
 # relative path is accepted via notify.ntfy.screenshot_dirs.
@@ -428,13 +454,230 @@ def set_watermark(project_dir: str, kind: str, value) -> None:
         log("notify: watermark save failed: %s" % e)
 
 
+# ---- burst coalescing state ------------------------------------------------
+# Kept beside the other push state on disk so a window that outlives its
+# process is delivered by the next event instead of vanishing with it.
+_cohort_lock = threading.Lock()
+_cohort = None          # built by _cohort_empty(); replaced, never mutated
+_cohort_loaded = False  # True once the state file has been read this process
+_cohort_timer = None    # pending threading.Timer for the open window
+
+
+def _cohort_path():
+    return _hawk.home_dir() / "cohort_push.json"
+
+
+def _cohort_empty() -> dict:
+    return {"kind": None, "since": 0.0, "items": [],
+            "last_eid": "", "last_entity": "", "exempt_used": False}
+
+
+def _cohort_entity(eid) -> str:
+    """The eid minus its trailing state: sub:x:started / sub:x:finished -> sub:x.
+
+    Empty when the eid carries no state at all, which turns the pair exemption
+    off rather than guessing that two unrelated events belong together."""
+    eid = str(eid or "")
+    return eid.rsplit(":", 1)[0] if ":" in eid else ""
+
+
+def _cohort_save_locked() -> None:
+    """Persist the open window. Failure is logged and swallowed: a burst
+    summary is not worth raising out of the push path."""
+    try:
+        _hawk.save_json(_cohort_path(), _cohort)
+    except Exception as e:
+        log_debug("notify: cohort save failed: %s" % e)
+
+
+def _cohort_ensure_loaded_locked() -> None:
+    """Read cohort_push.json once per process into _cohort."""
+    global _cohort, _cohort_loaded
+    if _cohort_loaded:
+        return
+    _cohort_loaded = True
+    _cohort = _cohort_empty()
+    try:
+        p = _cohort_path()
+        if not p.exists():
+            return
+        with open(p, "r", encoding="utf-8-sig") as f:
+            d = json.load(f)
+    except (OSError, ValueError) as e:
+        log_debug("notify: unreadable cohort state: %s" % e)
+        return
+    if not isinstance(d, dict) or not d.get("kind"):
+        return
+    base = _cohort_empty()
+    for k in base:
+        if k in d:
+            base[k] = d[k]
+    try:
+        base["since"] = float(base.get("since") or 0.0)
+    except (TypeError, ValueError):
+        base["since"] = 0.0
+    base["items"] = [i for i in (base.get("items") or []) if isinstance(i, dict)]
+    base["last_eid"] = str(base.get("last_eid") or "")
+    base["last_entity"] = str(base.get("last_entity") or "")
+    base["exempt_used"] = bool(base.get("exempt_used"))
+    _cohort = base
+
+
+def _cohort_timer_arm_locked(delay_s: float = None) -> None:
+    """(Re)arm the window timer. Must hold _cohort_lock."""
+    global _cohort_timer
+    if _cohort_timer is not None:
+        _cohort_timer.cancel()
+    t = threading.Timer(COALESCE_WINDOW_S if delay_s is None else delay_s,
+                        _flush_cohort)
+    t.daemon = True                  # a pending summary must not hold an exit
+    _cohort_timer = t
+    t.start()
+
+
+def _flush_cohort() -> bool:
+    """Deliver ONE summary push for whatever the open window collected.
+
+    Runs on the window timer, and from the next record_event after a restart
+    that outlived the window. Returns True only when a summary actually left."""
+    global _cohort_timer, _cohort
+    with _cohort_lock:
+        _cohort_ensure_loaded_locked()
+        items = list(_cohort.get("items") or [])
+        kind = str(_cohort.get("kind") or "")
+        _cohort = _cohort_empty()
+        if _cohort_timer is not None:
+            _cohort_timer.cancel()
+            _cohort_timer = None
+        _cohort_save_locked()
+    if not items or not kind:
+        return False
+    n = len(items)
+    s = "" if n == 1 else "s"
+    lines = ["%d %s event%s in the last %ds:" % (n, kind, s, COALESCE_WINDOW_S)]
+    for it in items[:COALESCE_MAX_LISTED]:
+        t = str(it.get("title") or "")
+        if t.startswith("[hawk] "):
+            t = t[7:]
+        lines.append("- " + t)
+    rest = n - COALESCE_MAX_LISTED
+    if rest > 0:
+        lines.append("... and %d more (full list in the dashboard)" % rest)
+    return _post_ntfy(load_config(),
+                      "[hawk] %d %s event%s in the last %ds" % (n, kind, s, COALESCE_WINDOW_S),
+                      "\n".join(lines), tags=KIND_TAGS.get(kind, ""),
+                      actions=None, kind=kind,
+                      eid="cohort:%s:%d" % (kind, int(_time.time())),
+                      meta={"cohort": n}, attach="")
+
+
+def _cohort_reset() -> None:
+    """Drop the open window completely: cancel its timer, forget it in memory,
+    and overwrite the state file so a reload cannot resurrect it.
+
+    Nothing on the prod hot path calls this - the armed timer and _cohort_ensure
+    finish a pending window instead of discarding it. Tests use it to isolate
+    cases from each other."""
+    global _cohort_timer, _cohort, _cohort_loaded
+    with _cohort_lock:
+        if _cohort_timer is not None:
+            _cohort_timer.cancel()
+            _cohort_timer = None
+        _cohort = _cohort_empty()
+        _cohort_save_locked()
+        _cohort_loaded = False    # next use reads the empty file just written
+
+
+def _cohort_ensure() -> None:
+    """Read the persisted window once and finish it if its time has passed.
+
+    The armed timer normally does this; the state file covers the case where
+    the process died inside a window, so the next subagent event of the next
+    run delivers the old burst instead of silently losing it."""
+    stale = False
+    with _cohort_lock:
+        _cohort_ensure_loaded_locked()
+        since = float(_cohort.get("since") or 0.0)
+        stale = bool(_cohort.get("kind")) and (_time.time() - since) >= COALESCE_WINDOW_S
+        if not stale and _cohort.get("kind") and _cohort_timer is None:
+            # A restart inherited the window but not its timer: re-arm for the
+            # time that is left, so the summary leaves on schedule even if no
+            # further event ever arrives to notice that it is overdue.
+            _cohort_timer_arm_locked(max(1.0, COALESCE_WINDOW_S - (_time.time() - since)))
+    if stale:
+        _flush_cohort()
+
+
+def _coalesce_collect(kind: str, title: str, body: str, eid: str) -> bool:
+    """True when this event rides the pending summary instead of its own push.
+
+    The event that OPENS a window is never collected - it is pushed by the
+    caller. An event for the entity just announced is exempt once per window,
+    so a subagent's started and finished both ring (subagent_state_eids). Every
+    other event inside the window is collected."""
+    global _cohort
+    entity = _cohort_entity(eid)
+    now = _time.time()
+    with _cohort_lock:
+        _cohort_ensure_loaded_locked()
+        active = (_cohort.get("kind") == kind
+                  and (now - float(_cohort.get("since") or 0.0)) < COALESCE_WINDOW_S)
+        exempt = (active and not bool(_cohort.get("exempt_used"))
+                  and bool(entity) and entity == _cohort.get("last_entity")
+                  and bool(eid) and eid != _cohort.get("last_eid"))
+        if not active or exempt:
+            return False
+        items = _cohort.setdefault("items", [])
+        if len(items) >= COALESCE_MAX_ITEMS:
+            # Never collect past the cap: close the window now and let the
+            # caller push this one itself, so no event is dropped.
+            _cohort_save_locked()
+            flush = True
+        else:
+            items.append({"title": title, "body": body, "eid": eid, "ts": now})
+            _cohort_save_locked()
+            flush = False
+    if flush:
+        _flush_cohort()
+        return False
+    return True
+
+
+def _cohort_open(kind: str, eid: str) -> None:
+    """Called right after an individual push of a coalescable kind.
+
+    Opens the window the next event will be collected into, or - when a window
+    is already open - records that the exempt pair-half just went out."""
+    global _cohort
+    entity = _cohort_entity(eid)
+    now = _time.time()
+    with _cohort_lock:
+        _cohort_ensure_loaded_locked()
+        active = (_cohort.get("kind") == kind
+                  and (now - float(_cohort.get("since") or 0.0)) < COALESCE_WINDOW_S)
+        if active:
+            _cohort["last_eid"] = str(eid or "")
+            _cohort["last_entity"] = entity
+            _cohort["exempt_used"] = True    # one exemption per window, no more
+        else:
+            _cohort = _cohort_empty()
+            _cohort["kind"] = kind
+            _cohort["since"] = now
+            _cohort["last_eid"] = str(eid or "")
+            _cohort["last_entity"] = entity
+            _cohort_timer_arm_locked()
+        _cohort_save_locked()
+
+
 def record_event(cfg, kind: str, title: str, body: str, eid: str = "",
                  meta: dict = None, attach: str = "") -> bool:
     """Unified phone-push entry point for every event kind.
 
     Applies, in order: topic configured, eid dedupe, kinds_enabled gate,
-    per-kind cooldown. Only a push that passes every gate is sent and
-    logged (suppressed events are neither logged nor pushed).
+    per-kind cooldown, burst coalescing (a chatty kind inside an open window
+    returns True without a second HTTP POST - it ships with the summary).
+    Only a push that passes every gate is sent and logged (suppressed events
+    are neither logged nor pushed).
     """
     if not _ntfy_cfg(cfg)["topic"]:
         return False
@@ -454,9 +697,23 @@ def record_event(cfg, kind: str, title: str, body: str, eid: str = "",
     tags = KIND_TAGS.get(kind, "")
     if kind == "subagent" and (meta or {}).get("state") == "error":
         tags = "warning:" + tags   # errored subagent -> warning badge (2026-09-23)
+    # Burst coalescing: inside an open window this event rides the summary, so
+    # a tree that finishes 74 tasks at once costs one POST, not 74.
+    if kind in COALESCE_KINDS:
+        _cohort_ensure()
+        if _coalesce_collect(kind, title, body, eid):
+            if eid:                # remember it as handled, so a duplicate eid
+                ids = list(st.get("pushed_eids") or [])   # is not re-processed
+                ids.append(eid)
+                st["pushed_eids"] = ids[-PUSHED_EIDS_CAP:]
+                _save_push_state(st)
+            return True
     sent = _post_ntfy(cfg, title, body,
                       tags=tags, actions=None,
                       kind=kind, eid=eid, meta=meta, attach=attach)
+    if kind in COALESCE_KINDS:
+        _cohort_open(kind, eid)    # whether or not it landed: the window counts
+                                   # events, and it rate-limits retries too
     if sent:
         now = int(_time.time())
         st.setdefault("last_push_ts", {})[kind] = now

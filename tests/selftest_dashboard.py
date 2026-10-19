@@ -970,6 +970,9 @@ def self_test():
     coordinator.db_path = lambda: tmpdb6
     from opencode_hawk import notify as notify6
     orig_npost = notify6._post_ntfy
+    # A subagent push opens a burst window that would swallow the next block's
+    # first event, so start and end each sample block with a clean one.
+    notify6._cohort_reset()
     pushes6 = []
 
     def rec_post6(c, title, body, tags="", actions=None, kind="alert",
@@ -1001,6 +1004,7 @@ def self_test():
         _event_push_sample()
         check("push_idle_no_repush", len(pushes6) == 2)
     finally:
+        notify6._cohort_reset()
         notify6._post_ntfy = orig_npost
         coordinator.db_path = orig_dbp6
         coordinator.home_dir = old_home6
@@ -1029,6 +1033,7 @@ def self_test():
     coordinator.db_path = lambda: tmpdb8
     from opencode_hawk import notify as notify8
     orig_npost8 = notify8._post_ntfy
+    notify8._cohort_reset()
     pushes8 = []
 
     def rec_post8(c, title, body, tags="", actions=None, kind="alert",
@@ -1072,6 +1077,7 @@ def self_test():
               and "started" in pushes8[0]["body"]
               and notify8.get_watermark("home", "subagent") == t8)
     finally:
+        notify8._cohort_reset()
         notify8._post_ntfy = orig_npost8
         coordinator.db_path = orig_dbp8
         coordinator.home_dir = old_home8
