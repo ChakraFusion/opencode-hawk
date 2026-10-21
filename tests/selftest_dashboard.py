@@ -648,18 +648,21 @@ def self_test():
     save_m = dash._tele_meta
     try:
         dash._tele_series = [{"t": 1, "tokens": 2, "tps": 3.5, "compact": False,
-                         "cpu_frac": 0.5, "ram_mb": 100.0, "vram_mb": 50.0,
-                         "gpu_pct": 10.0}]
+                         "cpu_frac": 0.5, "cpu_pct": 50, "ram_mb": 100.0,
+                         "vram_mb": 50.0, "gpu_pct": 10.0}]
         dash._tele_meta = {"cpu_frac": 0.5, "ram_mb": 100.0, "vram_mb": 50.0,
                       "gpu_pct": 10.0, "processing": False, "n_ctx": 4096,
                       "pid": 1, "total_tokens": 12345}
         p = llama_telemetry_payload()
-        pt = p["series"][0]
         check("telemetry_payload_fields",
-              pt["cpu_frac"] == 0.5 and pt["gpu_pct"] == 10.0
-              and pt["vram_mb"] == 50.0 and pt["ram_mb"] == 100.0
-              and pt["tps"] == 3.5 and p["gpu_pct"] == 10.0
-              and p["total_tokens"] == 12345)
+              p["cpu_pct"] == 50.0 and p["gpu_pct"] == 10.0
+              and p["vram_mb"] == 50.0 and p["ram_mb"] == 100.0
+              and p["tps"] == 3.5 and p["total_tokens"] == 12345)
+        # series/compactions were removed from the polling payload in 0.2.1:
+        # charts live on the dedicated /api/llama/history snapshot instead,
+        # so the hot endpoint stays under ~1 KB.
+        check("telemetry_payload_trimmed",
+              "series" not in p and "compactions" not in p)
         check("telemetry_payload_hw",
               "hw_sticks" in p and isinstance(p["hw_ram"], list)
               and all(s.get("locator") and s.get("gb", 0) > 0

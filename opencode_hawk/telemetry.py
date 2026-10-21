@@ -411,10 +411,12 @@ def _tele_loop():
 
 
 def llama_telemetry_payload() -> dict:
-    """Snapshot for /api/llama: live resource tiles + the sampled series
-    (context tokens / t/s / resource samples / compaction markers) for the
-    charts. vram_total_mb / ram_total_mb pin the chart Y-axes and the
-    used/total/% tiles."""
+    """Snapshot for /api/llama: live resource tiles (vram/ram/gpu/cpu/tokens).
+    The chart series (context tokens / t/s / resource samples / compaction
+    markers) is NOT included — the frontend draws those from /api/llama/history
+    under its own 30 s cadence, so shipping the ~600-point series with every
+    2 s tile poll was ~60% of the payload for data the client threw away.
+    vram_total_mb / ram_total_mb pin the chart Y-axes and the used/total/% tiles."""
     vram_total = coordinator.gpu_vram_total_mb()
     ram_total = coordinator.system_ram_total_mb()
     with dash._tele_lock:
@@ -446,8 +448,6 @@ def llama_telemetry_payload() -> dict:
             "hw_ram": dash.hw_ram_sticks_info(),
             "hw_disks": dash.hw_disk_activity(),
             "hw_gpus": dash.hw_gpus(),
-            "series": list(dash._tele_series),
-            "compactions": list(dash._tele_compactions),
         }
 
 

@@ -160,7 +160,7 @@ def creation_flags() -> int:
 # ── git timeline ──────────────────────────────────────────────────────────────
 _git_log_cache = {}
 _git_branch_cache = {}
-_GIT_LOG_TTL_S = 15
+_GIT_LOG_TTL_S = 30   # branch changes are operator-rare; the cache removes the coldest /api/state outlier (git subprocess)
 
 
 def clean_title(s: str, maxlen: int = 110) -> str:
@@ -1325,6 +1325,37 @@ def llama_status() -> dict:
 
 
 # ── HTTP ──────────────────────────────────────────────────────────────────────
+def watched_session_id(cfg, con, override_sid: str | None = None) -> str:
+    """Session the header's watched-worker timer tracks. An explicit override
+    (user picked a focus) always wins. Otherwise: when `monitored_sessions` has
+    enabled roots, follow the NEWEST enabled root whenever the legacy
+    `session_id` is not itself an enabled root — the monitor polls enabled
+    roots first (poll_ctx) and only then falls back to the legacy single-session
+    path, so the legacy field can stay pinned to a dead session forever.
+    With no enabled roots (or an unusable DB) fall back to the legacy field so
+    nothing changes."""
+    if (override_sid or "").strip():
+        return override_sid.strip()
+    sid = (cfg.get("session_id") or "").strip()
+    roots = [(k, e) for k, e in (cfg.get("monitored_sessions") or {}).items()
+             if e and e.get("enabled")]
+    if not roots:
+        return sid
+    if sid and any(k == sid for k, _ in roots):
+        return sid
+    if con:
+        try:
+            q = ",".join("?" for _ in roots)
+            row = con.execute(
+                "SELECT id FROM session WHERE id IN (%s) ORDER BY time_updated DESC" % q,
+                [k for k, _ in roots]).fetchone()
+            if row and row[0]:
+                return row[0]
+        except Exception:
+            pass
+    return roots[-1][0]
+
+
 def state_payload(override_sid: str | None = None) -> dict:
     cfg = coordinator.load_config()
     st = coordinator.load_state()
@@ -1344,6 +1375,14 @@ def state_payload(override_sid: str | None = None) -> dict:
     leaf = None
     try:
         con = coordinator.connect_db(coordinator.db_path())
+        # Re-derive which session the header tracks once we have the DB: an
+        # enabled monitored root outranks a stale legacy session_id (see
+        # watched_session_id). pst follows so continues/prev_head/last_evaluated
+        # also show the session the monitor is really driving.
+        selected = watched_session_id(cfg, con, override_sid)
+        pst = per.get(selected) if selected else st
+        if not isinstance(pst, dict):
+            pst = st
         idle = worker_idle_s(con, selected)
         stitle = session_title(con, selected)
         recommended = recommended_session_id(con, cfg)
@@ -2031,6 +2070,12 @@ class _ExclusiveHTTPServer(ThreadingHTTPServer):
     ran the pre-fix behaviour after a 'restart'. A duplicate now fails to
     bind and exits, so the newest process always wins."""
     allow_reuse_address = False
+
+    # A cold page load fires ~8 concurrent connections (one per loader) plus
+    # curl/monitor calls. The socketserver default backlog is 5: momentarily
+    # full accept ring -> Windows answers with RST -> ERR_CONNECTION_REFUSED
+    # in the browser. 64 keeps the queue harmless.
+    request_queue_size = 64
 
     def server_bind(self):
         if os.name == "nt":

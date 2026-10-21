@@ -26,6 +26,10 @@ let stateSelected = "";
 // Set once the user manually picks a session; suppresses auto-select so a
 // deliberate choice is not yanked back by the 2s refresh loop.
 let userPickedSession = false;
+// The user's explicit pick, kept in a module var: renderSessions rebuilds the
+// picker's options every tick, and a rebuild already resets .value to the
+// first option ("all") — reading picker.value afterwards would lose the pick.
+let userPickedSid = "";
 // Timeline "All sessions" view: the Event list aggregates every session
 // instead of only the focused one. Default ON (unless the user previously
 // picked a specific session) so hawk never opens on an empty Event list
@@ -80,7 +84,9 @@ function renderState(s) {
   const picker = $("session-picker");
   // In the All-sessions view the picker shows "all"; never stomp that back
   // to the focused session on the 2s refresh tick.
-  if (picker && !timelineAll && picker.value !== stateSelected) picker.value = stateSelected;
+  // Same for a user's explicit pick: state.selected is the WATCHED (enabled-root)
+  // session — the board focus is the user's choice and must not be yanked back.
+  if (picker && !timelineAll && !userPickedSession && picker.value !== stateSelected) picker.value = stateSelected;
 }
 
 // Agent-type bubble for subagent detail rows (same color as the subagent
@@ -707,7 +713,13 @@ function renderSessions(list) {
     stateSelected = actives[0].id;
     saveSession(actives[0].id, {selected: actives[0].id});
   }
-  picker.value = timelineAll ? "all" : (stateSelected || "");
+  // Rebuilding the option list resets .value to the first option ("all") —
+  // restore the wanted focus: the user's explicit pick beats everything, else
+  // the watched session (state.selected; decoupled on the server), else "all".
+  {
+    const pv = timelineAll ? "all" : (!userPickedSession ? (stateSelected || "") : userPickedSid);
+    picker.value = pv !== "all" && ![...picker.options].some(o => o.value === pv) ? "all" : pv;
+  }
 }
 
 // ---- Hawk notifications ----
@@ -1162,34 +1174,66 @@ if (btnSaveTopic) btnSaveTopic.onclick = () => saveTopic();
 const btnClearAll = $("btn-clear-all");
 if (btnClearAll) btnClearAll.onclick = () => clearAllNtfy();
 
-let refreshBusy = false;
-async function refreshAll() {
-  // The full refresh gathers ~6 endpoints; while one pass is still in flight
-  // the 2 s interval would stack overlapping passes (each re-scanning the DB
-  // and queuing behind the slowest request), which reads as 20-30 s lag after
-  // window/session changes. Drop ticks that arrive mid-refresh; the next tick
-  // covers them.
-  if (refreshBusy) return;
-  refreshBusy = true;
-  try {
-    await refreshAllInner();
-  } finally {
-    refreshBusy = false;
-  }
+// ── Refresh engine ───────────────────────────────────────────────────────────
+// Per-endpoint loaders, each with its own cadence and in-flight guard. The
+// tick fires them in PARALLEL, so one slow response (a cold /api/state with a
+// contended git probe measured 266 ms while the rest stay <20 ms) can no
+// longer add seconds of serial-chain lag after window/session changes. Rarely
+// changing, payload-heavy data (ntfy ~240 KB, timeline ~150 KB, sessions)
+// polls on a slower cadence instead of every 2 s, and window/picker changes
+// force only the loaders that actually depend on them.
+const LOADERS = [];
+function loader(load, everyMs) {
+  let busy = false, last = 0;
+  const run = function (force) {
+    if (busy) return;
+    if (!force && Date.now() - last < everyMs) return;
+    busy = true; last = Date.now();
+    const p = load();
+    if (p && typeof p.finally === "function")
+      p.catch(() => {}).finally(() => { busy = false; });
+    else if (p && typeof p.then === "function")
+      p.then(null, () => {}).then(() => { busy = false; });
+    else busy = false;
+  };
+  LOADERS.push(run);
+  return run;
 }
 
-async function refreshAllInner() {
-  try { renderState(await fetchJSON("/api/state")); } catch (e) { setBadge("MONITOR OFFLINE", "offline"); }
-  try { timelineRaw = await fetchJSON("/api/timeline?session=" +
-    (timelineAll ? "all" : encodeURIComponent(picker.value || ""))); renderTimeline(timelineRaw); } catch (e) {}
+let timelineSig = "";
+const L_state = loader(async () => {
+  try { renderState(await fetchJSON("/api/state")); }
+  catch (e) { setBadge("MONITOR OFFLINE", "offline"); }
+}, 2000);
+const L_timeline = loader(async () => {
+  const d = await fetchJSON("/api/timeline?session=" +
+    (timelineAll ? "all" : encodeURIComponent(picker.value || "")));
+  const sig = JSON.stringify(d);          // 150 KB parse+DOM per 4 s tick only when something changed
+  if (sig === timelineSig) return;
+  timelineSig = sig;
+  timelineRaw = d;
+  renderTimeline(timelineRaw);
+}, 4000);
+const L_sessions = loader(async () => {
   const sa = $("session-showall");
   if (sa && sa.checked !== showAllSessions) sa.checked = showAllSessions;
-  try { renderSessions(await fetchJSON("/api/sessions?all=" + (showAllSessions ? "1" : "0"))); } catch (e) {}
-  try { loadNtfy(); } catch (e) {}
-  try { loadNotifyKinds(); } catch (e) {}
-  try { loadNotifyPending(); } catch (e) {}
-  try { renderTelemetry(await fetchJSON("/api/llama")); } catch (e) {}
-  try { await loadHistory(); } catch (e) {}
+  const list = await fetchJSON("/api/sessions?all=" + (showAllSessions ? "1" : "0"));
+  const sig = (hideSubSessions ? "1" : "0") + ":" + JSON.stringify(list);
+  if (sig === sessionsSig) return;      // list + filter unchanged → no DOM churn
+  sessionsSig = sig;
+  renderSessions(list);
+}, 4000);
+let sessionsSig = "";
+const L_ntfy = loader(loadNtfy, 10000);
+const L_kinds = loader(loadNotifyKinds, 30000);
+const L_pending = loader(loadNotifyPending, 10000);
+const L_llama = loader(async () => renderTelemetry(await fetchJSON("/api/llama")), 2000);
+const L_history = loader(loadHistory, 15000);
+
+async function refreshAll() {
+  // Force one immediate pass of everything (still in parallel — used after
+  // user mutations such as control actions, settings saves or show-all flips).
+  for (const l of LOADERS) l(true);
 }
 
 async function control(intent) {
@@ -1207,7 +1251,7 @@ if (showallEl) {
   showallEl.onchange = () => {
     showAllSessions = showallEl.checked;
     try { localStorage.setItem("hawk_showall", showAllSessions ? "1" : "0"); } catch (_) {}
-    setTimeout(refreshAll, 100);
+    L_sessions(true);
   };
 }
 const hidesubEl = $("session-hidesub");
@@ -1216,7 +1260,7 @@ if (hidesubEl) {
   hidesubEl.onchange = () => {
     hideSubSessions = hidesubEl.checked;
     try { localStorage.setItem("hawk_hidesub", hideSubSessions ? "1" : "0"); } catch (_) {}
-    setTimeout(refreshAll, 100);
+    L_sessions(true);
   };
 }
 
@@ -1224,10 +1268,10 @@ const rangeBtns = document.querySelectorAll("#range-btns .range-btn");
 function setWin(w) {
   teleWin = w;
   for (const x of rangeBtns) x.classList.toggle("active", x.dataset.win === w);
-  loadHistory().catch(() => {});
+  L_history(true);       // only the charts depend on the window
   renderTimeline(timelineRaw);
   const nlog = $("notify-log");
-  if (nlog) renderNotifyLog(ntfyCache.log, nlog);
+  if (nlog) renderNtfy(ntfyCache);   // the notification log filters by teleWin too
 }
 for (const b of rangeBtns) b.onclick = () => setWin(b.dataset.win);
 
@@ -1329,16 +1373,31 @@ picker.onchange = () => {
   if (picker.value === "all") {
     timelineAll = true;
     userPickedSession = false;
+    userPickedSid = "";
     try { localStorage.setItem("hawk_timeline_all", "1"); } catch (_) {}
-    refreshAll();
+    L_timeline(true);
+    L_history(true);   // token charts/tiles follow the focus session
     return;
   }
   userPickedSession = true;
+  userPickedSid = picker.value;
   timelineAll = false;
   try { localStorage.setItem("hawk_timeline_all", "0"); } catch (_) {}
-  saveSession(picker.value, {selected: picker.value}).then(refreshAll);
+  saveSession(picker.value, {selected: picker.value}).then(() => {
+    L_timeline(true);
+    L_history(true);
+  });
 };
 
+// Hidden tabs stop polling entirely: every loader gate checks the tab
+// state, so a minimized dashboard costs zero requests (and, server-side,
+// zero llama/git subprocess probes). Returning to the tab forces one pass.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") refreshAll();
+});
 loadSettings();
 refreshAll();
-setInterval(refreshAll, 2000);
+setInterval(() => {
+  if (document.visibilityState !== "visible") return;
+  for (const l of LOADERS) l();
+}, 1000);
