@@ -52,3 +52,4 @@ dist/
 
 # Dashboard messages cleared but not yet expired on ntfy
 ntfy_hidden.json
+ntfy_health.json
