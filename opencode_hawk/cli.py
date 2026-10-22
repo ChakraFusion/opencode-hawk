@@ -111,6 +111,20 @@ def cmd_install_task(_args) -> int:
 WATCHDOG_TASK = "HawkWatchdog"
 
 
+def _launch_argv() -> list[str]:
+    """NOT [sys.executable, "-m", "opencode_hawk"]: `-m` resolves the package
+    name against the CWD first, so a launch from inside a package checkout
+    boots the checkout rather than the installed copy (seen live: a restart
+    with CWD = the repo ran the source tree, whose home_dir() is the repo —
+    empty config, no escalations folder — right beside the real user-home
+    stack). The pipx `hawk` entry point resolves independent of CWD; only
+    used when it is actually on PATH, else fall back to the old form."""
+    hawk = shutil.which("hawk")
+    if hawk:
+        return [hawk]
+    return [sys.executable, "-m", "opencode_hawk"]
+
+
 def _hawk_processes():
     """Running Hawk monitor / dashboard processes (psutil), as {'monitor': [pids], 'dashboard': [pids], 'run': [pids]}."""
     import psutil
@@ -152,7 +166,7 @@ def cmd_ensure(args) -> int:
             except Exception:
                 pass
         log = open(home / "hawk-console.log", "ab")
-        coordinator.spawn_independent([sys.executable, "-m", "opencode_hawk", "run", "--no-open", "--port", str(args.port)],
+        coordinator.spawn_independent(_launch_argv() + ["run", "--no-open", "--port", str(args.port)],
                                       stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
         coordinator.log("WATCHDOG: Hawk was not running (monitor %s, dashboard %s); started it"
                         % ("up" if procs["monitor"] else "down", "up" if dash_ok else "down"))
@@ -197,7 +211,7 @@ def cmd_install_watchdog(args) -> int:
 
 def cmd_run(args) -> int:
     """Monitor and dashboard as two child processes; Ctrl+C stops both."""
-    py = [sys.executable, "-m", "opencode_hawk"]
+    py = _launch_argv()
     monitor = py + ["monitor", "--interval", str(args.interval)]
     dash = py + ["dashboard", "--port", str(args.port)] + ([] if args.no_open else ["--open"])
     procs = [subprocess.Popen(monitor), subprocess.Popen(dash)]

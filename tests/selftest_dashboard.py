@@ -240,22 +240,51 @@ def self_test():
         st = json.loads(urllib.request.urlopen("http://127.0.0.1:%d/api/state" % port, timeout=5).read())
         check("api_state", st.get("prev_head") == "abc123" and st.get("continues") == 2
               and st.get("monitor_online") is True and st.get("paused") is False)
-        evs = json.loads(urllib.request.urlopen("http://127.0.0.1:%d/api/timeline" % port, timeout=5).read())
+        # /api/timeline is always enveloped now: {"_sig": digest, "items": [...]}
+        evs = json.loads(urllib.request.urlopen("http://127.0.0.1:%d/api/timeline" % port, timeout=5).read())["items"]
         check("api_escalation_in_timeline", any(e["kind"] == "escalation" for e in evs))
         check("api_permission_in_timeline",
               any(e["kind"] == "permission_accept" and "SomeApp" in e["detail"] for e in evs))
         evs_all = json.loads(urllib.request.urlopen(
-            "http://127.0.0.1:%d/api/timeline?session=all" % port, timeout=5).read())
+            "http://127.0.0.1:%d/api/timeline?session=all" % port, timeout=5).read())["items"]
         check("api_timeline_all", isinstance(evs_all, list)
               and any(e["kind"] == "escalation" for e in evs_all)
               and any(e["kind"] == "permission_accept" for e in evs_all))
+        # Conditional delivery: a bogus sig must come back as the full
+        # payload enveloped with the CURRENT digest; repeating that digest
+        # must collapse to the tiny {"same":1} short reply instead of
+        # resending the whole (up to ~200 KB) payload every poll.
+        evs_cond = json.loads(urllib.request.urlopen(
+            "http://127.0.0.1:%d/api/timeline?session=all&sig=bogus" % port,
+            timeout=5).read())
+        check("api_timeline_sig_envelope",
+              isinstance(evs_cond, dict) and isinstance(evs_cond.get("items"), list)
+              and len(evs_cond.get("_sig") or "") == 40
+              and [e["kind"] for e in evs_cond["items"]] == [e["kind"] for e in evs_all])
+        sig = evs_cond["_sig"]
+        same = json.loads(urllib.request.urlopen(
+            "http://127.0.0.1:%d/api/timeline?session=all&sig=%s" % (port, sig),
+            timeout=5).read())
+        check("api_timeline_sig_same",
+              same.get("same") == 1 and same.get("sig") == sig)
+        ntf_cond = json.loads(urllib.request.urlopen(
+            "http://127.0.0.1:%d/api/ntfy?sig=bogus" % port, timeout=5).read())
+        check("api_ntfy_sig_envelope",
+              isinstance(ntf_cond, dict) and len(ntf_cond.get("_sig") or "") == 40
+              and isinstance(ntf_cond.get("log"), list))
+        ncf = ntf_cond["_sig"]
+        ntfsame = json.loads(urllib.request.urlopen(
+            "http://127.0.0.1:%d/api/ntfy?sig=%s" % (port, ncf),
+            timeout=5).read())
+        check("api_ntfy_sig_same",
+              ntfsame.get("same") == 1 and ntfsame.get("sig") == ncf)
         req = urllib.request.Request("http://127.0.0.1:%d/api/control" % port,
                                      data=json.dumps({"intent": "pause"}).encode(),
                                      headers={"Content-Type": "application/json"})
         resp = json.loads(urllib.request.urlopen(req, timeout=5).read())
         check("api_control", resp.get("seq") == 1 and (tmp / "control.json").exists())
         tls = json.loads(urllib.request.urlopen("http://127.0.0.1:%d/api/timeline" % port, timeout=5).read())
-        check("api_timeline_hydrated", isinstance(tls, list))
+        check("api_timeline_hydrated", isinstance(tls.get("items"), list))
         req = urllib.request.Request("http://127.0.0.1:%d/api/session" % port,
                                      data=json.dumps({"session_id": "ses_x", "enabled": True}).encode(),
                                      headers={"Content-Type": "application/json"})

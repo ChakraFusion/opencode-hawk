@@ -993,7 +993,10 @@ async function saveTopic() {
 
 async function loadNtfy() {
   try {
-    const d = await fetchJSON("/api/ntfy");
+    const url = "/api/ntfy" + (ntfyCond ? "?sig=" + encodeURIComponent(ntfyCond) : "");
+    const d = await fetchJSON(url);
+    if (d && d.same) return;          // digest match: nothing changed since our render
+    ntfyCond = d && d._sig ? d._sig : null;
     ntfyCache = d;
     const key = JSON.stringify([d.topic, d.log, d.channel, d.health]);
     if (key !== ntfyCache.lastKey) {
@@ -1002,6 +1005,7 @@ async function loadNtfy() {
     }
   } catch (e) { /* keep stale view */ }
 }
+let ntfyCond = null;
 
 async function testNtfy() {
   devMsg("testing push…");
@@ -1200,18 +1204,30 @@ function loader(load, everyMs) {
   return run;
 }
 
-let timelineSig = "";
+let timelineCond = null;   // {url, sig} of the payload the DOM was built from
 const L_state = loader(async () => {
   try { renderState(await fetchJSON("/api/state")); }
   catch (e) { setBadge("MONITOR OFFLINE", "offline"); }
 }, 2000);
 const L_timeline = loader(async () => {
-  const d = await fetchJSON("/api/timeline?session=" +
-    (timelineAll ? "all" : encodeURIComponent(picker.value || "")));
-  const sig = JSON.stringify(d);          // 150 KB parse+DOM per 4 s tick only when something changed
-  if (sig === timelineSig) return;
-  timelineSig = sig;
-  timelineRaw = d;
+  // Conditional payload state for the two heavy endpoints: every response
+  // carries the payload digest (_sig); the client echoes it back as ?sig=
+  // and the server answers with a ~50-byte {"same":1} instead of up to
+  // 200 KB of unchanged JSON (~380 KB parse per cycle on an idle board).
+  // The sig is only sent while the DOM was built from this same scope:
+  // switching scopes needs a full payload first.
+  const url = "/api/timeline?session=" +
+    (timelineAll ? "all" : encodeURIComponent(picker.value || ""));
+  const hasCond = timelineCond && timelineCond.url === url;
+  const d = await fetchJSON(url + (hasCond ? "&sig=" + encodeURIComponent(timelineCond.sig) : ""));
+  if (d && d.same) return;      // digest match: DOM already shows this exact content
+  if (d && d.items !== undefined) {
+    timelineRaw = d.items;
+    timelineCond = { url, sig: d._sig };
+  } else {                       // non-enveloped server (older build): full path
+    timelineRaw = d;
+    timelineCond = null;
+  }
   renderTimeline(timelineRaw);
 }, 4000);
 const L_sessions = loader(async () => {

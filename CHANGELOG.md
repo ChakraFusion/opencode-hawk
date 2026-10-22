@@ -2,14 +2,32 @@
 
 All notable changes to Hawk are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
-[Semantic Versioning](https://semver.org/). `0.2.1` is the current version in
+[Semantic Versioning](https://semver.org/). `0.2.3` is the current version in
 `opencode_hawk/__init__.py` (the single source of truth — `pyproject.toml` reads
 it dynamically); entries are added under **Unreleased** until a version is tagged.
 
 ## [Unreleased]
 
-## [0.2.1] - 2026-10-21
+## [0.2.3] - 2026-10-21
 
+### Fixed
+- `hawk ensure`, `hawk run` and the watchdog no longer inherit a CWD shadow:
+  a launch from inside a package checkout used to boot the checkout (=
+  repo-root home with an empty config and no escalations folder) instead of
+  the pipx-installed copy, silently running two stacks. Launches now prefer
+  the `hawk` entry point, which resolves independent of CWD, falling back to
+  `-m` only when no entry point is on PATH.
+
+## [0.2.2] - 2026-10-21
+
+### Added
+- Conditional payload delivery for the two heavy endpoints (`/api/timeline`,
+  `/api/ntfy`): after the first full delivery the frontend echoes the
+  payload's digest back as `?sig=`; a matching digest answers with a
+  ~50-byte `{"same":1}` short reply instead of resending the payload
+  (idle-state boards drop from ~380 KB per poll cycle to a few bytes).
+
+## [0.2.1] - 2026-10-21
 
 ### Added
 - Log levels (`HAWK_LOG_LEVEL`) and size-capped rotation

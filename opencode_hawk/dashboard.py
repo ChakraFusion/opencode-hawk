@@ -4,6 +4,7 @@ hawk. Stdlib only. Binds 127.0.0.1."""
 from __future__ import annotations
 import argparse
 import base64
+import hashlib
 import json
 import os
 import re
@@ -1484,6 +1485,25 @@ class WebHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_json_cond(self, sig: str | None, payload, wrap: bool = False):
+        """Conditional payload delivery (ETag-style, in the body since the
+        frontend helpers speak JSON only).
+
+        Every response carries the digest of the exact payload content
+        (`_sig`), so the client can echo it on the next poll; a matching
+        `sig` param answers with a ~50-byte {"same":1} instead of up to
+        ~200 KB of unchanged JSON. LIST payloads are enveloped as
+        {"_sig": ..., "items": [...]}; dict payloads carry `_sig` as an
+        extra key the client just reads through."""
+        digest = hashlib.sha1(
+            json.dumps(payload, sort_keys=True,
+                       separators=(",", ":")).encode("utf-8")).hexdigest()
+        if sig and sig == digest:
+            self._send_json({"same": 1, "sig": digest})
+            return
+        self._send_json({"_sig": digest, "items": payload} if wrap
+                        else dict(payload, _sig=digest))
+
     def _send_404(self, msg="not found"):
         self._send_json({"error": msg}, 404)
 
@@ -1577,11 +1597,13 @@ class WebHandler(BaseHTTPRequestHandler):
                     raw = qs.get("session", [cfg.get("session_id") or ""])[0]
                     # "all" = aggregate every session (frontend default view).
                     sid = "" if raw in ("", "all") else raw
-                    self._send_json(_cache_fetch(
+                    payload = _cache_fetch(
                         "timeline|" + raw, TIMELINE_CACHE_S,
                         lambda: timeline_events(
                             cfg.get("project_dir") or "", sid, con,
-                            since_ms=utcms() - TIMELINE_SCAN_WINDOW_S * 1000)))
+                            since_ms=utcms() - TIMELINE_SCAN_WINDOW_S * 1000))
+                    self._send_json_cond(
+                        qs.get("sig", [None])[0], payload, wrap=True)
                 finally:
                     if con is not None:
                         con.close()
@@ -1674,7 +1696,8 @@ class WebHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/ntfy":
             try:
-                self._send_json(ntfy_payload())
+                self._send_json_cond(qs.get("sig", [None])[0],
+                                     ntfy_payload())
             except Exception as e:
                 self._send_json({"error": str(e)}, 500)
             return
